@@ -3,36 +3,29 @@
     "step": {
       "user": {
         "title": "Xiaomi Scale HA",
-        "description": "Configure the scale MAC address and user matching ranges.",
+        "description": "Configure household profiles. Use [] to keep readings unassigned. Each profile needs NAME; GT/LT are optional kg ranges. Height and date of birth are optional.",
         "data": {
           "name": "Name",
           "mac": "Scale MAC address",
-          "notify_service": "Mobile notification service",
           "persistent_notification": "Create persistent notification for pending measurements",
           "notify_assigned": "Send mobile notification when a weight is registered",
           "impedance_wait_seconds": "Seconds to wait for impedance before notifying",
-          "alexa_actions": "Use Alexa actionable notifications for pending measurements",
-          "alexa_action_script": "Alexa actionable notification script",
-          "alexa_suppress_confirmation": "Suppress Alexa OK confirmation",
           "users": "Users JSON"
         }
       },
       "init": {
         "title": "Xiaomi Scale HA options",
         "data": {
-          "notify_service": "Mobile notification service",
           "persistent_notification": "Create persistent notification for pending measurements",
           "notify_assigned": "Send mobile notification when a weight is registered",
           "impedance_wait_seconds": "Seconds to wait for impedance before notifying",
-          "alexa_actions": "Use Alexa actionable notifications for pending measurements",
-          "alexa_action_script": "Alexa actionable notification script",
-          "alexa_suppress_confirmation": "Suppress Alexa OK confirmation",
           "users": "Users JSON"
-        }
+        },
+        "description": "Configure household profiles. Use [] to keep readings unassigned. Each profile needs NAME; GT/LT are optional kg ranges. Height and date of birth are optional."
       }
     },
     "error": {
-      "invalid_users": "Users JSON is invalid. Check required fields NAME, GT, LT, SEX, HEIGHT and DOB."
+      "invalid_users": "Check the unique profile names, valid kg ranges and optional profile fields."
     },
     "abort": {
       "already_configured": "This scale is already configured."
@@ -41,18 +34,44 @@
   "options": {
     "step": {
       "init": {
-        "title": "Xiaomi Scale HA options",
+        "title": "Xiaomi Scale",
+        "menu_options": {
+          "edit_profile": "Edit a person\u2019s profile",
+          "settings": "Notifications and measurement settings"
+        }
+      },
+      "edit_profile": {
+        "title": "Choose a person",
         "data": {
-          "notify_service": "Mobile notification service",
-          "persistent_notification": "Create persistent notification for pending measurements",
-          "notify_assigned": "Send mobile notification when a weight is registered",
-          "impedance_wait_seconds": "Seconds to wait for impedance before notifying",
-          "alexa_actions": "Use Alexa actionable notifications for pending measurements",
-          "alexa_action_script": "Alexa actionable notification script",
-          "alexa_suppress_confirmation": "Suppress Alexa OK confirmation",
-          "users": "Users JSON"
+          "person": "Person"
+        }
+      },
+      "profile": {
+        "title": "{person} \u2014 scale profile",
+        "description": "Automatic matching learns from confirmed readings. Overlapping matches ask the candidates; unmatched readings ask everyone. Height, birthdate and sex are used to recalculate estimates from stored impedance. Enter the year directly; all three birthdate fields must form a valid date.",
+        "data": {
+          "GT": "Minimum weight",
+          "LT": "Maximum weight",
+          "HEIGHT": "Height",
+          "SEX": "Sex used by the body-fat formula",
+          "manual_range": "Override automatic matching with a fixed weight range",
+          "birth_day": "Day of birth",
+          "birth_month": "Month of birth",
+          "birth_year": "Year of birth"
+        }
+      },
+      "settings": {
+        "title": "Measurement settings",
+        "data": {
+          "persistent_notification": "Show unassigned readings in HA notifications",
+          "notify_assigned": "Notify the owner when a weight is registered",
+          "impedance_wait_seconds": "Seconds to wait for impedance"
         }
       }
+    },
+    "error": {
+      "invalid_profile": "Check the height, date of birth, and both weight bounds (minimum must be less than maximum).",
+      "invalid_users": "Invalid profiles."
     }
   }
 }

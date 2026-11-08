@@ -1,474 +1,280 @@
-from __future__ import annotations
+"""Household workflow built on Xiaomi Scale HA's decoder and sensors.
 
+All ownership decisions and received records share one persistent HA Store.
+Phone actions identify a measurement and candidate; an asyncio lock serializes claims.
+"""
+from __future__ import annotations
 import asyncio
+from copy import deepcopy
+from dataclasses import asdict
+from datetime import datetime, timezone
 import logging
-from time import monotonic
 from typing import Any
 
-from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers.dispatcher import async_dispatcher_send
-
-from .const import (
-    CONF_ALEXA_ACTIONS,
-    CONF_ALEXA_ACTION_SCRIPT,
-    CONF_ALEXA_SUPPRESS_CONFIRMATION,
-    CONF_IMPEDANCE_WAIT_SECONDS,
-    CONF_MAC,
-    CONF_NOTIFY_ASSIGNED,
-    CONF_NOTIFY_SERVICE,
-    CONF_PERSISTENT_NOTIFICATION,
-    CONF_USER_ALEXA_DEVICE,
-    CONF_USER_NOTIFY_SERVICE,
-    CONF_USERS,
-    DOMAIN,
-    EVENT_ASSIGNED,
-    EVENT_DISCARDED,
-    EVENT_PENDING,
-    SERVICE_ASSIGN_PENDING,
-    SERVICE_DISCARD_PENDING,
-    SIGNAL_MEASUREMENT,
-)
-from .history import UserHistory
-from .metrics import METRIC_KEYS, build_metrics, same_weight_session, slug
-from .parser import ScaleMeasurement
+from homeassistant.helpers.storage import Store
+from .const import DOMAIN, CONF_MAC, CONF_USERS, SIGNAL_MEASUREMENT, EVENT_ASSIGNED, EVENT_PENDING, EVENT_DISCARDED
+from .ledger import Ledger, seconds_between
+from .metrics import build_metrics, METRIC_KEYS
 
 _LOGGER = logging.getLogger(__name__)
 
+def utcnow():
+    return datetime.now(timezone.utc).isoformat()
+
+def public_record(record):
+    return {k:v for k,v in record.items() if k not in ('packet_ids', 'closed', 'last_seen')}
+
+class HistoryView:
+    def __init__(self, runtime):
+        self.runtime = runtime
+    @property
+    def data(self):
+        users = {}
+        for r in self.runtime.ledger.records:
+            if r['status'] == 'assigned':
+                users.setdefault(r['user_name'], []).append(public_record(r))
+        return users
+    def summary(self):
+        return {name:{'count':len(rows), 'measurements':rows[-10:]} for name,rows in self.data.items()}
 
 class XiaomiScaleRuntime:
-    def __init__(self, hass: HomeAssistant, entry: ConfigEntry) -> None:
-        self.hass = hass
-        self.entry = entry
-        self.name: str = entry.data["name"]
-        self.mac: str = entry.data[CONF_MAC].upper()
-        self.users: list[dict[str, Any]] = entry.options.get(CONF_USERS, entry.data[CONF_USERS])
-        self.history = UserHistory(hass, f"{DOMAIN}_{entry.entry_id}_history")
-        self.latest_by_user: dict[str, dict[str, Any]] = {}
-        self.last_metrics_by_user: dict[str, dict[str, Any]] = {}
-        self.pending: dict[str, Any] | None = None
-        self.last_diagnostic: dict[str, Any] = {"state": "starting"}
-        self.last_notification: dict[str, Any] = {}
-        self._action_to_user: dict[str, str | None] = {}
-        self._alexa_event_to_user: dict[str, str] = {}
-        self._last_signature: tuple[float, int | None] | None = None
-        self._last_signature_time: float = 0
-        self._pending_finalize: dict[str, asyncio.Task] = {}
+    def __init__(self, hass: HomeAssistant, entry):
+        self.hass, self.entry = hass, entry
+        self.name = entry.data['name']
+        self.mac = entry.data[CONF_MAC].upper()
+        self.users = entry.options.get(CONF_USERS, entry.data.get(CONF_USERS, []))
+        self.store = Store(hass, 1, f'{DOMAIN}_{entry.entry_id}_records')
+        self.ledger = Ledger()
+        self.history = HistoryView(self)
+        self.lock = asyncio.Lock()
+        self.latest_by_user = {}
+        self.last_metrics_by_user = {}
+        self.last_metric_records = {}
+        self.last_diagnostic = {'state':'starting'}
+        self.last_notification = {}
+        self._pending_finalize = {}
 
-    async def async_setup(self) -> None:
-        await self.history.async_load()
-        self._restore_latest_measurements()
+    @property
+    def pending_records(self):
+        return [r for r in self.ledger.records if r['status'] == 'pending']
 
-    def _restore_latest_measurements(self) -> None:
-        for user in self.users:
-            user_name = user.get("NAME")
-            if not isinstance(user_name, str):
-                continue
-            latest = self.history.latest_measurement(user_name)
-            if latest is not None:
-                self.latest_by_user[user_name] = latest
-                metrics = {k: latest[k] for k in METRIC_KEYS if k in latest}
-                if metrics:
-                    self.last_metrics_by_user[user_name] = metrics
+    @property
+    def pending(self):
+        records = self.pending_records
+        if not records:
+            return None
+        return {**public_record(records[0]), 'pending_count':len(records),
+                'measurements':[public_record(r) for r in records]}
 
-    async def async_clear_history(self, user_name: str | None = None) -> None:
-        await self.history.async_clear(user_name)
-        self.last_diagnostic = {"state": "history_cleared", "user_name": user_name}
+    async def async_setup(self):
+        data = await self.store.async_load() or {}
+        self.ledger = Ledger(data.get('records', []))
+        await self._mutate(lambda:[self._metrics(r) for r in self.ledger.records])
+        for r in self.ledger.records:
+            if r['status'] == 'collecting':
+                self._schedule(r['measurement_id'], 0)
+
+    def _refresh(self):
+        self.latest_by_user = {}
+        self.last_metrics_by_user = {}
+        self.last_metric_records = {}
+        for r in self.ledger.records:
+            if r['status'] == 'assigned':
+                self.latest_by_user[r['user_name']] = public_record(r)
+                self.last_metrics_by_user[r['user_name']] = {k:r[k] for k in METRIC_KEYS if k in r}
+                for key in METRIC_KEYS:
+                    self.last_metric_records.pop((r['user_name'], key), None)
+                for k in METRIC_KEYS:
+                    if k in r: self.last_metric_records[(r['user_name'],k)] = r
         async_dispatcher_send(self.hass, SIGNAL_MEASUREMENT, self.entry.entry_id)
 
-    async def async_delete_history_measurement(self, user_name: str, index: int) -> None:
-        await self.history.async_delete_measurement(user_name, index)
-        self.last_diagnostic = {
-            "state": "history_measurement_deleted",
-            "user_name": user_name,
-            "index": index,
-        }
-        async_dispatcher_send(self.hass, SIGNAL_MEASUREMENT, self.entry.entry_id)
+    async def _mutate(self, operation):
+        async with self.lock:
+            before = deepcopy(self.ledger.records)
+            try:
+                result = operation()
+                if self.ledger.records != before:
+                    await self.store.async_save({'records':self.ledger.records})
+            except BaseException:
+                self.ledger.records = before
+                raise
+            self._refresh()
+            return deepcopy(result)
 
-    async def async_handle_measurement(self, measurement: ScaleMeasurement) -> None:
-        sig = (measurement.weight, measurement.impedance)
-        now = monotonic()
-        if self._last_signature == sig and now - self._last_signature_time < 30:
+    def _metrics(self, record):
+        if record and record['status'] == 'assigned':
+            user = next((u for u in self.users if u['NAME']==record['user_name']), None)
+            if user:
+                metrics = build_metrics(record, user)
+                old = {k:record[k] for k in METRIC_KEYS | {'metrics_error'} if k in record}
+                if old != metrics:
+                    for key in METRIC_KEYS | {'metrics_error'}:
+                        record.pop(key, None)
+                    record.update(metrics)
+                    record["metrics_updated_at"] = utcnow()
+        return record
+
+    async def async_handle_measurement(self, measurement):
+        def observe():
+            record, new = self.ledger.observe(asdict(measurement))
+            self._metrics(record)
+            return record, new
+        record, new = await self._mutate(observe)
+        if not record:
             return
-        self._last_signature = sig
-        self._last_signature_time = now
+        self.last_diagnostic = {'state':record['status'], **public_record(record)}
+        if new:
+            self._schedule(record['measurement_id'], self.entry.options.get('impedance_wait_seconds', 8))
+        self._refresh()
 
-        candidates = self.history.candidates(measurement.weight, self.users)
-        payload = {
-            "weight": measurement.weight,
-            "unit": measurement.unit,
-            "timestamp": measurement.timestamp,
-            "impedance": measurement.impedance,
-            "has_impedance": measurement.impedance is not None,
-            "source_address": measurement.source_address,
-            "rssi": measurement.rssi,
-        }
-        self.last_diagnostic = {
-            "state": "measurement_received",
-            "timestamp": measurement.timestamp,
-            "weight": measurement.weight,
-            "unit": measurement.unit,
-            "impedance": measurement.impedance,
-            "candidates": candidates,
-            "source_address": measurement.source_address,
-            "rssi": measurement.rssi,
-        }
+    def _schedule(self, measurement_id, delay):
+        if measurement_id not in self._pending_finalize:
+            self._pending_finalize[measurement_id] = self.hass.async_create_task(self._finalize_later(measurement_id, delay))
 
-        if len(candidates) == 1:
-            user_name = candidates[0]
-            self.last_diagnostic["state"] = "assigned"
-            self.last_diagnostic["user_name"] = user_name
-            await self.async_assign_payload(payload, user_name, finalize=False)
-            return
-
-        if len(candidates) > 1:
-            self.last_diagnostic["state"] = "pending"
-            await self.async_set_pending({**payload, "candidates": candidates})
-            return
-
-        all_users = [u.get("NAME") for u in self.users if isinstance(u.get("NAME"), str)]
-        if all_users:
-            _LOGGER.info(
-                "No user matched %.2f %s — sending pending notification to all %d user(s)",
-                measurement.weight, measurement.unit, len(all_users),
-            )
-            self.last_diagnostic["state"] = "pending"
-            self.last_diagnostic["candidates"] = all_users
-            await self.async_set_pending({**payload, "candidates": all_users})
-            return
-        self.last_diagnostic["state"] = "no_user_matched"
-        async_dispatcher_send(self.hass, SIGNAL_MEASUREMENT, self.entry.entry_id)
-        _LOGGER.info("No configured user matched %.2f %s", measurement.weight, measurement.unit)
-
-    async def async_set_pending(self, payload: dict[str, Any]) -> None:
-        self.pending = payload
-        self._action_to_user = self._build_action_map(payload["candidates"])
-        self.hass.bus.async_fire(EVENT_PENDING, self.pending_event_data)
-        async_dispatcher_send(self.hass, SIGNAL_MEASUREMENT, self.entry.entry_id)
-        await self.async_send_pending_notification()
-        await self.async_send_alexa_actionable_notifications()
-
-    async def async_assign_pending(self, user_name: str) -> bool:
-        if self.pending is None:
-            return False
-        await self.async_assign_payload(dict(self.pending), user_name, finalize=True)
-        return True
-
-    async def async_assign_payload(self, payload: dict[str, Any], user_name: str, finalize: bool) -> None:
-        user = next((item for item in self.users if item["NAME"] == user_name), None)
-        if user is None:
-            raise HomeAssistantError(f"Unknown user: {user_name}")
-
-        payload.update(build_metrics(payload, user))
-        new_metrics = {k: payload[k] for k in METRIC_KEYS if k in payload}
-        if new_metrics:
-            existing_metrics = self.last_metrics_by_user.get(user_name, {})
-            self.last_metrics_by_user[user_name] = {**existing_metrics, **new_metrics}
-        existing = self.latest_by_user.get(user_name)
-        if existing and same_weight_session(existing, payload):
-            if existing.get("_finalized"):
-                payload["_finalized"] = True
-            payload = {**existing, **payload}
-        self.latest_by_user[user_name] = payload
-        self.pending = None
-        self._action_to_user = {}
-        self._alexa_event_to_user = {}
-        await self._dismiss_pending_notification()
-        if finalize:
-            await self._finalize_assigned_measurement(user, payload)
-        else:
-            self._schedule_assigned_finalize(user, payload)
-        async_dispatcher_send(self.hass, SIGNAL_MEASUREMENT, self.entry.entry_id)
-
-    def _schedule_assigned_finalize(self, user: dict[str, Any], payload: dict[str, Any]) -> None:
-        user_name = user["NAME"]
-        task = self._pending_finalize.pop(user_name, None)
-        if task is not None:
-            task.cancel()
-
-        wait_seconds = self.entry.options.get(CONF_IMPEDANCE_WAIT_SECONDS, 8)
-        if payload.get("impedance") is not None or wait_seconds <= 0:
-            self.hass.async_create_task(self._finalize_assigned_measurement(user, payload))
-            return
-
-        self._pending_finalize[user_name] = self.hass.async_create_task(
-            self._delayed_finalize_assigned_measurement(user, wait_seconds)
-        )
-
-    async def _delayed_finalize_assigned_measurement(self, user: dict[str, Any], wait_seconds: int) -> None:
-        user_name = user["NAME"]
+    async def _finalize_later(self, measurement_id, delay):
         try:
-            await asyncio.sleep(wait_seconds)
-            payload = self.latest_by_user.get(user_name)
-            if payload is not None:
-                await self._finalize_assigned_measurement(user, payload)
-        except asyncio.CancelledError:
-            raise
+            await asyncio.sleep(delay)
+            record = await self._mutate(lambda:self._metrics(self.ledger.finalize(measurement_id, self.users)))
+            if not record:
+                return
+            self.last_diagnostic = {'state':record['status'], **public_record(record)}
+            if record['status'] == 'assigned':
+                await self._assigned(record)
+            else:
+                self.hass.bus.async_fire(EVENT_PENDING, {'entry_id':self.entry.entry_id, **public_record(record)})
+                await self._notify_pending(record)
         finally:
-            if self._pending_finalize.get(user_name) is asyncio.current_task():
-                self._pending_finalize.pop(user_name, None)
+            self._pending_finalize.pop(measurement_id, None)
 
-    async def _finalize_assigned_measurement(self, user: dict[str, Any], payload: dict[str, Any]) -> None:
-        user_name = user["NAME"]
-        if payload.get("_finalized"):
-            _LOGGER.info(
-                "Skipping duplicate finalization for %s: same-session weight already finalized",
-                user_name,
-            )
-            self.last_notification = {
-                "result": "skipped",
-                "reason": "already_finalized",
-                "user_name": user_name,
-                "timestamp": payload.get("timestamp"),
-            }
-            async_dispatcher_send(self.hass, SIGNAL_MEASUREMENT, self.entry.entry_id)
-            return
-        payload["_finalized"] = True
-        await self.history.async_add_measurement(
-            user_name, float(payload["weight"]), payload["timestamp"], payload
-        )
-        await self._send_assigned_notification(user, payload)
-        self.hass.bus.async_fire(
-            EVENT_ASSIGNED,
-            {"entry_id": self.entry.entry_id, "user_name": user_name, **payload},
-        )
-        async_dispatcher_send(self.hass, SIGNAL_MEASUREMENT, self.entry.entry_id)
-
-    async def async_discard_pending(self, reason: str = "discarded") -> bool:
-        if self.pending is None:
+    async def _resolve(self, measurement_id, user_name, decision, manual=False):
+        record = await self._mutate(lambda:self._metrics(self.ledger.resolve(measurement_id, user_name, decision, utcnow(), manual)))
+        if not record:
             return False
-        payload = self.pending
-        self.pending = None
-        self._action_to_user = {}
-        self._alexa_event_to_user = {}
-        for task in self._pending_finalize.values():
-            task.cancel()
-        self._pending_finalize.clear()
-        await self._dismiss_pending_notification()
-        self.hass.bus.async_fire(
-            EVENT_DISCARDED,
-            {"entry_id": self.entry.entry_id, "reason": reason, **payload},
-        )
-        async_dispatcher_send(self.hass, SIGNAL_MEASUREMENT, self.entry.entry_id)
-        return True
-
-    async def async_send_pending_notification(self) -> None:
-        if self.pending is None:
-            return
-        candidates = self.pending.get("candidates", [])
-        weight = self.pending["weight"]
-        unit = self.pending["unit"]
-        message = f"Pesaje sin asignar: {weight} {unit}. Candidatos: {', '.join(candidates)}."
-
-        if self.entry.options.get(CONF_PERSISTENT_NOTIFICATION, True):
-            actions = "\n".join(
-                f"- Asignar a {c}: ejecuta `{DOMAIN}.{SERVICE_ASSIGN_PENDING}` con `user_name: {c}`"
-                for c in candidates
-            )
-            await self.hass.services.async_call(
-                "persistent_notification",
-                "create",
-                {
-                    "notification_id": self.notification_id,
-                    "title": "Xiaomi Scale HA",
-                    "message": f"{message}\n\n{actions}\n- Descartar: `{DOMAIN}.{SERVICE_DISCARD_PENDING}`",
-                },
-                blocking=False,
-            )
-
-        for notify_service in self._notify_services_for_users(candidates):
-            await self._send_pending_mobile_notification(notify_service, message)
-
-    async def async_send_alexa_actionable_notifications(self) -> None:
-        if not self.pending or not self.entry.options.get(CONF_ALEXA_ACTIONS, False):
-            return
-        script_service = self.entry.options.get(
-            CONF_ALEXA_ACTION_SCRIPT, "script.activate_alexa_actionable_notification"
-        ).strip()
-        if not script_service or "." not in script_service:
-            _LOGGER.warning("Invalid Alexa actionable script service: %s", script_service)
-            return
-
-        domain, service = script_service.split(".", 1)
-        candidates = self.pending.get("candidates", [])
-        weight = self.pending["weight"]
-        unit = self.pending["unit"]
-        suppress = self.entry.options.get(CONF_ALEXA_SUPPRESS_CONFIRMATION, True)
-        self._alexa_event_to_user = {}
-
-        for user_name in candidates:
-            user = next((item for item in self.users if item["NAME"] == user_name), None)
-            if not user:
-                continue
-            alexa_device = user.get(CONF_USER_ALEXA_DEVICE, "")
-            if not isinstance(alexa_device, str) or not alexa_device.strip():
-                continue
-            event_id = f"{DOMAIN}_{self.entry.entry_id}_alexa_{slug(user_name)}"
-            self._alexa_event_to_user[event_id] = user_name
-            await self.hass.services.async_call(
-                domain,
-                service,
-                {
-                    "text": f"Pesaje sin asignar de {weight} {unit}. {user_name}, ¿eres tú?",
-                    "event_id": event_id,
-                    "alexa_device": alexa_device.strip(),
-                    "suppress_confirmation": suppress,
-                },
-                blocking=False,
-            )
-
-    async def async_handle_mobile_action(self, action: str) -> bool:
-        if action not in self._action_to_user:
-            return False
-        user_name = self._action_to_user[action]
-        if user_name is None:
-            await self.async_discard_pending("mobile_action")
+        if decision == 'decline':
+            await self._clear_phone(record, self._user(user_name))
+            self.last_diagnostic = {'state':'awaiting_confirmation' if set(record['candidates'])-set(record['declined']) else 'manual_review', **public_record(record)}
         else:
-            await self.async_assign_pending(user_name)
+            await self._clear_notifications(record)
+            if record['status'] == 'assigned':
+                await self._assigned(record)
+            else:
+                self.hass.bus.async_fire(EVENT_DISCARDED, {'entry_id':self.entry.entry_id, **public_record(record)})
+        self._refresh()
         return True
 
-    async def async_handle_alexa_action(self, event_id: str, response_type: str | None) -> bool:
-        user_name = self._alexa_event_to_user.get(event_id)
-        if user_name is None:
+    async def async_assign_pending(self, user_name, measurement_id):
+        if not self._user(user_name):
+            raise HomeAssistantError('Unknown scale user')
+        return await self._resolve(measurement_id, user_name, 'claim', manual=True)
+
+    async def async_respond_pending(self, measurement_id, decision, user_id):
+        # Derive identity from the authenticated service context, never client data.
+        matches = [u for u in self.users if user_id and u.get('HA_USER_ID') == user_id]
+        if len(matches) != 1:
+            raise HomeAssistantError('Your HA account must be linked to exactly one scale profile')
+        if decision not in ('claim', 'decline'):
+            raise HomeAssistantError('Invalid scale response')
+        if not await self._resolve(measurement_id, matches[0]['NAME'], decision):
+            raise HomeAssistantError('This reading is no longer available for your confirmation. Refresh the dashboard; an administrator can resolve older readings.')
+
+    async def async_discard_pending(self, measurement_id, reason='discarded'):
+        return await self._resolve(measurement_id, None, 'discard', manual=True)
+
+    async def async_handle_mobile_action(self, action, user_id=None, device_id=None):
+        prefix = f'{DOMAIN}:{self.entry.entry_id}:'
+        if not action.startswith(prefix):
             return False
-        if response_type == "ResponseYes":
-            await self.async_assign_pending(user_name)
-        elif response_type == "ResponseNo":
-            _LOGGER.info("Alexa rejected pending measurement for %s", user_name)
-        else:
-            _LOGGER.debug("Ignoring Alexa response %s for event %s", response_type, event_id)
-        return True
+        parts = action[len(prefix):].split(':')
+        if len(parts) != 3:
+            return False
+        measurement_id, decision, index = parts
+        record = self.ledger.get(measurement_id)
+        if not record or decision not in ('claim', 'decline') or not index.isdigit():
+            return False
+        candidates = record.get('candidates', [])
+        if int(index) >= len(candidates):
+            return False
+        user_name = candidates[int(index)]
+        user = self._user(user_name)
+        # Webhook events normally carry the HA user. Device binding is a fallback.
+        expected = user.get('HA_USER_ID') if user else None
+        expected_device = user.get('MOBILE_DEVICE_ID') if user else None
+        if not ((expected and user_id == expected) or (not user_id and expected_device and device_id == expected_device)):
+            _LOGGER.warning('Ignored scale confirmation from an unexpected phone/user')
+            return False
+        return await self._resolve(measurement_id, user_name, decision)
 
-    @property
-    def pending_event_data(self) -> dict[str, Any]:
-        return {"entry_id": self.entry.entry_id, **(self.pending or {})}
+    async def async_handle_alexa_action(self, *args):
+        return False
 
-    @property
-    def notification_id(self) -> str:
-        return f"{DOMAIN}_{self.entry.entry_id}_pending"
+    def _user(self, name):
+        return next((u for u in self.users if u['NAME']==name), None)
 
-    def _build_action_map(self, candidates: list[str]) -> dict[str, str | None]:
-        action_map: dict[str, str | None] = {
-            self._action_for(i, c): c for i, c in enumerate(candidates)
-        }
-        action_map[self._discard_action] = None
-        return action_map
+    def _tag(self, record):
+        return f'{DOMAIN}_{record["measurement_id"]}'
 
-    def _action_for(self, index: int, candidate: str) -> str:
-        return f"{DOMAIN}_{self.entry.entry_id}_assign_{index}_{slug(candidate)}"
-
-    @property
-    def _discard_action(self) -> str:
-        return f"{DOMAIN}_{self.entry.entry_id}_discard"
-
-    def _notify_service_for_user(self, user: dict[str, Any]) -> str:
-        svc = user.get(CONF_USER_NOTIFY_SERVICE, "")
-        return svc.strip() if isinstance(svc, str) else ""
-
-    def _notify_services_for_users(self, user_names: list[str]) -> list[str]:
-        seen: set[str] = set()
-        result: list[str] = []
-        for user_name in user_names:
-            user = next((u for u in self.users if u["NAME"] == user_name), None)
-            svc = self._notify_service_for_user(user) if user else ""
-            if svc and svc not in seen:
-                seen.add(svc)
-                result.append(svc)
-        return result
-
-    async def _send_assigned_notification(self, user: dict[str, Any], payload: dict[str, Any]) -> None:
-        user_name = user["NAME"]
-        if not self.entry.options.get(CONF_NOTIFY_ASSIGNED, False):
-            _LOGGER.debug(
-                "Assigned notification skipped for %s: notify_assigned is disabled in options",
-                user_name,
-            )
-            self.last_notification = {
-                "result": "skipped",
-                "reason": "notify_assigned_disabled",
-                "user_name": user_name,
-                "timestamp": payload.get("timestamp"),
-            }
-            return
-        notify_service = self._notify_service_for_user(user)
-        if not notify_service:
-            _LOGGER.warning(
-                "Assigned notification skipped for %s: no notify_service configured for this user",
-                user_name,
-            )
-            self.last_notification = {
-                "result": "skipped",
-                "reason": "no_notify_service",
-                "user_name": user_name,
-                "timestamp": payload.get("timestamp"),
-            }
-            return
-        weight = payload["weight"]
-        unit = payload["unit"]
-        message = f"{user_name}: {weight} {unit}"
-        details = []
-        if (bmi := payload.get("bmi")) is not None:
-            details.append(f"BMI {bmi}")
-        if (body_fat := payload.get("body_fat")) is not None:
-            details.append(f"grasa {body_fat}%")
-        if details:
-            message = f"{message} ({', '.join(details)})"
-        _LOGGER.info(
-            "Sending assigned notification for %s via %s: %s", user_name, notify_service, message
-        )
-        self.last_notification = {
-            "result": "sent",
-            "user_name": user_name,
-            "service": notify_service,
-            "message": message,
-            "timestamp": payload.get("timestamp"),
-        }
-        await self._send_mobile_notification(
-            notify_service,
-            "Peso registrado",
-            message,
-            data={"tag": f"{DOMAIN}_{self.entry.entry_id}_{slug(user_name)}_assigned", "group": DOMAIN},
-        )
-
-    async def _send_mobile_notification(
-        self, notify_service: str, title: str, message: str, data: dict[str, Any] | None = None
-    ) -> None:
-        if "." not in notify_service:
-            _LOGGER.warning("Invalid notify service: %s", notify_service)
-            return
-        domain, service = notify_service.split(".", 1)
-        if domain != "notify":
-            _LOGGER.warning("Notify service must start with notify.: %s", notify_service)
+    async def _notify(self, user, message, title='Xiaomi Scale', data=None):
+        service = (user or {}).get('NOTIFY_SERVICE', '')
+        if not service.startswith('notify.mobile_app_'):
             return
         try:
-            await self.hass.services.async_call(
-                domain, service,
-                {"title": title, "message": message, "data": data or {}},
-                blocking=True,
-            )
+            await self.hass.services.async_call('notify', service.split('.',1)[1],
+                {'message':message, 'title':title, 'data':data or {}}, blocking=True)
+            self.last_notification = {'result':'sent', 'service':service, 'timestamp':utcnow()}
         except Exception as err:
-            _LOGGER.error("Failed to send notification via %s: %s", notify_service, err)
-            if self.last_notification.get("result") == "sent":
-                self.last_notification.update({"result": "error", "error": str(err)})
+            self.last_notification = {'result':'error', 'service':service, 'error':str(err)}
+            _LOGGER.warning('Scale notification failed for %s: %s', service, err)
 
-    async def _send_pending_mobile_notification(self, notify_service: str, message: str) -> None:
-        candidates = self.pending.get("candidates", []) if self.pending else []
-        actions = [
-            {"action": self._action_for(i, c), "title": f"Soy {c}"}
-            for i, c in enumerate(candidates)
-        ]
-        actions.append({"action": self._discard_action, "title": "Descartar"})
-        await self._send_mobile_notification(
-            notify_service,
-            "Pesaje sin asignar",
-            message,
-            data={"tag": self.notification_id, "group": DOMAIN, "actions": actions},
-        )
+    async def _notify_pending(self, record):
+        if self.entry.options.get('persistent_notification', True):
+            await self.hass.services.async_call('persistent_notification','create',
+                {'notification_id':self._tag(record), 'title':'Unassigned scale measurement',
+                 'message':f'{record["weight"]:.2f} kg, measured at {record["timestamp"]}. Waiting for confirmation. Measurement: {record["measurement_id"]}.'}, blocking=True)
+        if seconds_between(record['timestamp'], utcnow()) > 86400:
+            return
+        for index, name in enumerate(record['candidates']):
+            if name in record['declined']:
+                continue
+            prefix = f'{DOMAIN}:{self.entry.entry_id}:{record["measurement_id"]}'
+            await self._notify(self._user(name), f'{record["weight"]:.2f} kg — is this your measurement?',
+                data={'tag':self._tag(record), 'group':DOMAIN, 'actions':[
+                    {'action':f'{prefix}:claim:{index}', 'title':"That's me", 'authenticationRequired':True},
+                    {'action':f'{prefix}:decline:{index}', 'title':'Not me', 'authenticationRequired':True}]})
 
-    async def _dismiss_pending_notification(self) -> None:
-        await self.hass.services.async_call(
-            "persistent_notification", "dismiss",
-            {"notification_id": self.notification_id},
-            blocking=False,
-        )
+    async def async_send_pending_notification(self):
+        for record in deepcopy(self.pending_records):
+            await self._notify_pending(record)
+
+    async def _clear_phone(self, record, user):
+        await self._notify(user, 'clear_notification', data={'tag':self._tag(record)})
+
+    async def _clear_notifications(self, record):
+        await self.hass.services.async_call('persistent_notification', 'dismiss', {'notification_id':self._tag(record)}, blocking=True)
+        for name in record.get('candidates', []):
+            await self._clear_phone(record, self._user(name))
+
+    async def _assigned(self, record):
+        self.last_diagnostic = {'state':'assigned', **public_record(record)}
+        self.hass.bus.async_fire(EVENT_ASSIGNED, {'entry_id':self.entry.entry_id, **public_record(record)})
+        if self.entry.options.get('notify_assigned', False):
+            await self._notify(self._user(record['user_name']), f'{record["weight"]:.2f} kg registered for {record["user_name"]}.',
+                title='Weight registered', data={'tag':self._tag(record)+'_assigned', 'group':DOMAIN})
+        self._refresh()
+
+    async def async_clear_history(self, user_name=None):
+        def clear():
+            self.ledger.records = [r for r in self.ledger.records if r['status'] != 'assigned' or (user_name and r['user_name'] != user_name)]
+        await self._mutate(clear)
+
+    async def async_delete_history_measurement(self, user_name, index):
+        def delete():
+            rows = [r for r in self.ledger.records if r['status']=='assigned' and r['user_name']==user_name]
+            try:
+                target = rows[index]
+            except IndexError:
+                return
+            self.ledger.records.remove(target)
+        await self._mutate(delete)

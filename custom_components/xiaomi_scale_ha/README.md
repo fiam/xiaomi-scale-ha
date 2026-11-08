@@ -1,176 +1,165 @@
-# Xiaomi Scale HA
+# Xiaomi Scale HA — persistent household measurements
 
-Custom integration for Xiaomi Mi Scale BLE advertisements using Home Assistant's
-shared Bluetooth stack. This means local Bluetooth adapters and ESPHome Bluetooth
-proxies can all provide advertisements to the integration.
+This is [fiam/xiaomi-scale-ha](https://github.com/fiam/xiaomi-scale-ha), a fork of
+[ermarmon/xiaomi-scale-ha](https://github.com/ermarmon/xiaomi-scale-ha) based on
+commit `7877ebcbbddc8b5df2881aa0678626d93d6eafee` (upstream 0.2.1).
+The integration domain remains `xiaomi_scale_ha`, so existing entity/config entry
+identities can be preserved when replacing the component.
 
-## Install
+This fork focuses on the native Home Assistant integration. The legacy MQTT
+scripts and add-on folders remain inherited from upstream; the new workflow below
+applies to `custom_components/xiaomi_scale_ha`.
 
-Copy `custom_components/xiaomi_scale_ha` into your Home Assistant config folder:
+## Features
 
-```text
-/config/custom_components/xiaomi_scale_ha
-```
+- Xiaomi BLE weight and impedance decoding through HA's Bluetooth stack, including
+  ESPHome-compatible proxies such as [fiam/btproxy](https://github.com/fiam/btproxy).
+- Persistent records with IDs, reception timestamps, weight, raw impedance,
+  ownership status and candidate responses.
+- Automatic matching learns from human-confirmed readings (within 2 kg of the
+  median of the last ten). One match assigns; overlapping matches ask the
+  candidates; no match asks everyone. Optional fixed ranges override learning.
+- Each phone receives **That's me** / **Not me**. The first valid claim wins.
+  Old buttons cannot claim new records. Claims are bound to the configured HA user
+  or phone, and buttons expire after 24 hours.
+- Pending records survive restarts. All declines leave a record for manual review;
+  a decline never automatically assigns it to another person.
+- Profile forms in HA for height, date of birth, sex and optional weight ranges.
+- Raw impedance retained before profile details are available. Saving a profile
+  recalculates historical body-fat estimates using age at the measurement date.
+- Weight-only readings have no body-fat estimate. Earlier records keep their own
+  impedance and estimates; values are never carried across readings.
+- A dashboard card with account-bound confirmation buttons, personal history first
+  and expandable household measurements.
+- Separate weigh-ins of the same weight are preserved; packets from one physical
+  weighing session are combined.
 
-Restart Home Assistant, then add the integration from:
+No Apple Health / HealthKit export is included. Body-fat values are estimates from
+upstream's formula and require valid impedance plus the profile details.
 
-```text
-Settings > Devices & services > Add integration > Xiaomi Scale HA
-```
+## Installation
 
-Home Assistant 2026.3+ loads the integration icon and logo from the local
-`brand/` directory.
+For a pinned manual install, download the release ZIP and checksum from this
+fork's Releases page, verify the checksum, and extract the component into
+`<HA config>/custom_components/xiaomi_scale_ha`. Restart HA and add **Xiaomi Scale HA**
+under **Settings → Devices & services**.
 
-## Configuration
+This repository retains HACS metadata and can be added as a custom **Integration**
+repository using `https://github.com/fiam/xiaomi-scale-ha`. Do not install both
+forks at once: they use the same integration domain.
 
-The setup flow asks for:
+## Initial setup
 
-- Scale MAC address.
-- Optional mobile notification service, for example `notify.mobile_app_your_phone`.
-- Whether to create Home Assistant persistent notifications for pending measurements.
-- Whether to send a mobile notification when a weight is registered.
-- Seconds to wait for impedance before sending the registered-weight notification.
-- Users JSON.
-
-Example users JSON:
+Enter the scale MAC address and a list of people in Users JSON. The data below is
+an example; replace the identifiers and notification service with your own:
 
 ```json
 [
   {
-    "NAME": "User1",
-    "GT": 50,
-    "LT": 80,
-    "SEX": "male",
-    "HEIGHT": 175,
-    "DOB": "1985-01-01",
-    "NOTIFY_SERVICE": "notify.mobile_app_user1",
-    "ALEXA_DEVICE": "media_player.echo_user1"
+    "NAME": "Person A",
+    "NOTIFY_SERVICE": "notify.mobile_app_person_a_phone",
+    "HA_USER_ID": "replace-with-the-persons-ha-user-id"
+  },
+  {
+    "NAME": "Person B",
+    "NOTIFY_SERVICE": "notify.mobile_app_person_b_phone",
+    "HA_USER_ID": "replace-with-the-persons-ha-user-id"
   }
 ]
 ```
 
-`GT` and `LT` are the bootstrap weight range in kg. After a user has at least
-three measurements, the integration matches future readings against that user's
-recent history.
+`NAME` is required and must be unique. Notification routing is optional, but
+phone confirmation requires `HA_USER_ID` to identify the responding HA user.
+`MOBILE_DEVICE_ID` is an optional fallback for events without a user context.
+Use the mobile app's device identifier, not an unrelated device registry ID.
+Do not publish your real configuration or records.
 
-`NOTIFY_SERVICE` is optional per user. Registered-weight notifications for that
-user go only to that service. Pending ambiguous measurements are sent only to the
-candidate users' notification services. If a user has no `NOTIFY_SERVICE`, that
-user does not receive a mobile notification.
+An empty list keeps readings pending without sending phone notifications.
+The initial user list and phone associations are configured at setup; the current
+options forms edit existing people rather than adding/removing them.
 
-`ALEXA_DEVICE` is optional per user. Alexa actionable notifications are disabled
-by default. When enabled, pending ambiguous measurements ask each candidate on
-their configured Echo device.
+Under **Configure → Edit a person's profile**, select a person and set:
 
-You can edit users later from the integration options:
+- Optional fixed matching range: inclusive minimum/maximum in kg.
+- Height in cm, date of birth and male/female formula setting for body-fat estimates.
 
-```text
-Settings > Devices & services > Xiaomi Scale HA > Configure
-```
+With no confirmed history, readings ask everyone. Each person’s confirmed readings
+then seed automatic matching. Automatic assignments do not train the matching
+range. Birthdate uses separate day/month/year fields so any year can be entered
+directly. Under **Notifications and measurement settings**, configure registered
+weight notifications and the default eight-second wait for impedance.
 
-Saving options reloads the integration so newly added or removed users get their
-sensor entities refreshed.
+## Data and manual review
 
-## Notes
+The store is `<HA config>/.storage/xiaomi_scale_ha_<entry_id>_records`.
+Records are retained until explicitly deleted. The history sensor shows only the
+last ten records per person; this does not truncate stored history.
+Back up the configuration directory. Do not edit storage while HA is running.
 
-The scale only needs BLE advertisements, so ESPHome Bluetooth proxies work with
-`connectable: false`.
+Pending sensor attributes include measurement IDs and candidate/decline lists.
+Manual `xiaomi_scale_ha.assign_pending` requires `user_name` and `measurement_id`;
+`discard_pending` requires `measurement_id`. User-initiated manual changes require
+an HA administrator. `send_pending_notification` resends unresolved requests.
 
-## Matching and pending measurements
+Weight sensors expose their record attributes, including raw impedance when
+available. Body-fat sensors expose `measured_at` and `measurement_id` for the latest
+reading and become unknown when that reading has no estimate. Profile updates
+recalculate the ledger and current sensor values; they do not rewrite historical
+Home Assistant Recorder states.
 
-When a stabilized measurement arrives:
+## Dashboard
 
-- If exactly one user matches, the integration assigns the measurement and stores it
-  in the user's history.
-- If several users match, the measurement becomes pending.
-- If no user matches, the measurement is ignored and logged.
-
-For users with fewer than three measurements, matching uses the configured `GT` and
-`LT` range. After that, it compares the new weight with the user's recent history.
-
-The scale often sends a stable weight first and then sends another advertisement
-with impedance a few seconds later. The integration updates the sensor as soon as
-the weight arrives, but delays the registered-weight notification for
-`impedance_wait_seconds` so it can include impedance-based metrics when available.
-If the user steps off before impedance is measured, the weight-only notification
-is still sent after the wait window.
-
-## Notifications
-
-Pending measurements can create:
-
-- A persistent notification in Home Assistant.
-- A mobile actionable notification if a candidate user has `NOTIFY_SERVICE`.
-- A confirmation notification when a weight is registered, if enabled in options.
-- An Alexa actionable question if Alexa actions are enabled and candidate users
-  have `ALEXA_DEVICE` configured.
-
-Mobile actions are handled by listening for the `mobile_app_notification_action`
-event and assigning or discarding the pending measurement automatically.
-
-Alexa actionable notifications require the external Alexa Actions setup by
-keatontaylor and a script compatible with `script.activate_alexa_actionable_notification`.
-The integration calls that script with:
-
-- `text`
-- `event_id`
-- `alexa_device`
-- `suppress_confirmation`
-
-It listens for `alexa_actionable_notification`. A `ResponseYes` assigns the
-pending measurement to that user; `ResponseNo` keeps the pending measurement
-available for another candidate or manual assignment.
-
-## Services
-
-The integration registers these actions:
-
-- `xiaomi_scale_ha.assign_pending`
-- `xiaomi_scale_ha.discard_pending`
-- `xiaomi_scale_ha.send_pending_notification`
-- `xiaomi_scale_ha.clear_history`
-- `xiaomi_scale_ha.delete_history_measurement`
-
-`entry_id` is optional when only one scale is configured.
-
-### History maintenance
-
-The diagnostic `history` entity shows the stored recent measurements per user.
-The last stored measurement is restored on integration startup so user weight
-sensors do not become unknown just because Home Assistant restarted.
-
-The diagnostic `last BLE measurement` entity starts as `listening` after the
-Bluetooth callbacks are registered. If it stays there, the integration is loaded
-but has not received a matching advertisement from the configured scale yet.
-
-Clear one user's history:
+Add a JavaScript module resource under **Settings → Dashboards → Resources**:
+`/xiaomi_scale_ha/scale-card.js?v=0.3.0`. The integration serves this file after HA
+restarts. Use a panel view and this card (replace the sample entity names and IDs):
 
 ```yaml
-action: xiaomi_scale_ha.clear_history
-data:
-  user_name: Ernes
+type: custom:xiaomi-scale-card
+pending_entity: sensor.xiaomi_scale_pending_measurement
+history_entity: sensor.xiaomi_scale_history
+people:
+  - name: Person A
+    user_id: replace-with-the-persons-ha-user-id
+    weight_entity: sensor.xiaomi_scale_person_a_weight
+    body_fat_entity: sensor.xiaomi_scale_person_a_body_fat
+  - name: Person B
+    user_id: replace-with-the-persons-ha-user-id
+    weight_entity: sensor.xiaomi_scale_person_b_weight
+    body_fat_entity: sensor.xiaomi_scale_person_b_body_fat
 ```
 
-Clear all history:
+For multiple scales, also set `entry_id`. The card shows pending readings, the
+signed-in person's measurements, then other household members. `That's me` and
+`Not me` call `xiaomi_scale_ha.respond_pending`; the server derives identity from
+the authenticated HA account, not the card configuration. Administrators can
+assign older or unmatched readings through the expanded assignment control.
+These cards organize existing HA sensor data; they are not per-person privacy
+boundaries. Other members' data remains accessible through HA's normal entities.
 
-```yaml
-action: xiaomi_scale_ha.clear_history
-data: {}
+## Upgrading from upstream
+
+Back up HA first. This fork's persistent ledger uses a new `_records` storage key.
+Existing upstream `_history` data is not automatically imported; it is left intact.
+Existing user configuration is preserved, but mobile confirmation requires a user
+or device binding as described above. Alexa actions are not supported by this fork.
+Historical records without impedance cannot be backfilled with body-fat values.
+
+## Tests
+
+```sh
+python3 -m unittest discover -s tests -p 'test_*.py' -v
 ```
 
-Delete the latest stored measurement for one user:
+Parser and ledger tests run without HA. Runtime and config tests require HA and
+are otherwise skipped. To run all tests with the pinned validation environment:
 
-```yaml
-action: xiaomi_scale_ha.delete_history_measurement
-data:
-  user_name: Ernes
-  index: -1
+```sh
+docker run --rm -v "$PWD:/work" -w /work --entrypoint python \
+  ghcr.io/home-assistant/home-assistant:2026.10.4 \
+  -m unittest discover -s tests -p 'test_*.py' -v
 ```
 
-## Events
+Tests use synthetic fixtures, fake storage and notification calls; they do not
+contact devices or create real measurements. CI runs both test modes.
 
-The integration fires these events:
-
-- `xiaomi_scale_ha_pending_measurement`
-- `xiaomi_scale_ha_measurement_assigned`
-- `xiaomi_scale_ha_measurement_discarded`
+MIT licensed; original attribution is retained in `LICENSE` and the component.

@@ -12,18 +12,7 @@ CONF_ALEXA_ACTION_SCRIPT = "alexa_action_script"
 CONF_ALEXA_SUPPRESS_CONFIRMATION = "alexa_suppress_confirmation"
 CONF_USER_ALEXA_DEVICE = "ALEXA_DEVICE"
 
-DEFAULT_USERS_JSON = """[
-  {
-    "NAME": "User1",
-    "GT": 50,
-    "LT": 80,
-    "SEX": "male",
-    "HEIGHT": 175,
-    "DOB": "1985-01-01",
-    "NOTIFY_SERVICE": "",
-    "ALEXA_DEVICE": ""
-  }
-]"""
+DEFAULT_USERS_JSON = "[]"
 
 SIGNAL_MEASUREMENT = f"{DOMAIN}_measurement"
 

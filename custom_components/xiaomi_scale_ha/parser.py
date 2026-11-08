@@ -1,13 +1,12 @@
+"""Decode scale broadcasts. Reception time is used because the scale clock may be unset."""
 from __future__ import annotations
-
-import binascii
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from hashlib import sha256
 from typing import Any
 
-MISCALE_V2_UUID = "0000181b-0000-1000-8000-00805f9b34fb"
-MISCALE_V1_UUID = "0000181d-0000-1000-8000-00805f9b34fb"
-
+MISCALE_V2_UUID = '0000181b-0000-1000-8000-00805f9b34fb'
+MISCALE_V1_UUID = '0000181d-0000-1000-8000-00805f9b34fb'
 
 @dataclass(frozen=True)
 class ScaleMeasurement:
@@ -18,67 +17,46 @@ class ScaleMeasurement:
     impedance: int | None
     source_address: str
     rssi: int | None
+    load_removed: bool = False
+    packet_id: str = ''
 
-
-def parse_service_info(service_info: Any) -> ScaleMeasurement | None:
-    service_data = {
-        str(key).lower(): value for key, value in service_info.service_data.items()
-    }
-    timestamp = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S+00:00")
-    address = service_info.address
-    rssi = getattr(service_info, "rssi", None)
-
+def parse_service_info(info: Any) -> ScaleMeasurement | None:
+    service_data = {str(k).lower(): bytes(v) for k,v in info.service_data.items()}
+    impedance = None
     if MISCALE_V2_UUID in service_data:
-        data = binascii.b2a_hex(service_data[MISCALE_V2_UUID]).decode("ascii")
-        data = "1b18" + data
-        payload = bytes.fromhex(data[4:])
-        ctrl_byte = payload[1]
-        stabilized = bool(ctrl_byte & (1 << 5))
-        has_impedance = bool(ctrl_byte & (1 << 1))
-        measunit = data[4:6]
-        measured = int((data[28:30] + data[26:28]), 16) * 0.01
-        unit = ""
-        if measunit == "03":
-            unit = "lbs"
-        if measunit == "02":
-            unit = "kg"
-            measured = measured / 2
-        if not unit:
+        data = service_data[MISCALE_V2_UUID]
+        if len(data) != 13:
             return None
-        impedance = int((data[24:26] + data[22:24]), 16) if has_impedance else None
-        return ScaleMeasurement(
-            weight=round(measured, 2),
-            unit=unit,
-            timestamp=timestamp,
-            stabilized=stabilized,
-            impedance=impedance,
-            source_address=address,
-            rssi=rssi,
-        )
-
-    if MISCALE_V1_UUID in service_data:
-        data = binascii.b2a_hex(service_data[MISCALE_V1_UUID]).decode("ascii")
-        data = "1d18" + data
-        measunit = data[4:6]
-        measured = int((data[8:10] + data[6:8]), 16) * 0.01
-        unit = ""
-        if measunit.startswith(("03", "a3")):
-            unit = "lbs"
-        if measunit.startswith(("12", "b2")):
-            unit = "jin"
-        if measunit.startswith(("22", "a2")):
-            unit = "kg"
-            measured = measured / 2
-        if not unit:
+        control = data[1]
+        raw = int.from_bytes(data[11:13], 'little')
+        if data[0] == 2:
+            weight = raw / 200
+        elif data[0] == 3:
+            weight = raw / 100 * 0.45359237
+        else:
             return None
-        return ScaleMeasurement(
-            weight=round(measured, 2),
-            unit=unit,
-            timestamp=timestamp,
-            stabilized=True,
-            impedance=None,
-            source_address=address,
-            rssi=rssi,
-        )
-
-    return None
+        if control & 2:
+            value = int.from_bytes(data[9:11], 'little')
+            if 0 < value < 65533:
+                impedance = value
+    elif MISCALE_V1_UUID in service_data:
+        data = service_data[MISCALE_V1_UUID]
+        if len(data) < 3:
+            return None
+        control = data[0]
+        raw = int.from_bytes(data[1:3], 'little')
+        if control & 1:
+            weight = raw / 100 * 0.45359237
+        elif control & 16:
+            weight = raw / 200
+        else:
+            weight = raw / 200
+    else:
+        return None
+    if not 0 < weight <= 250:
+        return None
+    return ScaleMeasurement(
+        round(weight, 2), 'kg', datetime.now(timezone.utc).isoformat(),
+        bool(control & 32), impedance, info.address, getattr(info, 'rssi', None),
+        bool(control & 128), sha256(data).hexdigest(),
+    )

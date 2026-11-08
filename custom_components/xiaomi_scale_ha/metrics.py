@@ -16,15 +16,17 @@ def build_metrics(payload: dict[str, Any], user: dict[str, Any]) -> dict[str, An
     else:
         calc_weight = weight
 
+    if not user.get("HEIGHT"):
+        return {}
     height_m = float(user["HEIGHT"]) / 100
     result = {"bmi": round(calc_weight / (height_m * height_m), 2)}
 
     impedance = payload.get("impedance")
-    if impedance:
+    if impedance and user.get("DOB") and user.get("SEX"):
         try:
             from .body_metrics import bodyMetrics
 
-            age = age_years(user["DOB"])
+            age = age_years(user["DOB"], payload.get("timestamp"))
             metrics = bodyMetrics(calc_weight, int(user["HEIGHT"]), age, user["SEX"], int(impedance))
             result.update(
                 {
@@ -45,9 +47,10 @@ def build_metrics(payload: dict[str, Any], user: dict[str, Any]) -> dict[str, An
     return result
 
 
-def age_years(dob: str) -> float:
-    born = datetime.strptime(dob, "%Y-%m-%d")
-    return abs((datetime.today() - born).days) / 365
+def age_years(dob: str, timestamp: str | None = None) -> float:
+    born = datetime.strptime(dob, "%Y-%m-%d").date()
+    measured = datetime.fromisoformat(timestamp).date() if timestamp else datetime.today().date()
+    return max(0, (measured - born).days) / 365.2425
 
 
 def slug(value: str) -> str:

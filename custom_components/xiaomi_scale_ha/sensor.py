@@ -34,6 +34,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry, async_add_e
         user_name = user["NAME"]
         entities.append(XiaomiScaleWeightSensor(runtime, user_name))
         for key, label, unit, device_class, icon in METRIC_DEFS:
+            if key != "body_fat" and (not user.get("HEIGHT") or (key != "bmi" and not (user.get("DOB") and user.get("SEX")))):
+                continue
             entities.append(XiaomiScaleMetricSensor(runtime, user_name, key, label, unit, device_class, icon))
     entities.append(XiaomiScalePendingSensor(runtime))
     entities.append(XiaomiScaleDiagnosticSensor(runtime))
@@ -123,6 +125,15 @@ class XiaomiScaleMetricSensor(XiaomiScaleBaseSensor):
     @property
     def native_value(self) -> float | int | None:
         return self.runtime.last_metrics_by_user.get(self.user_name, {}).get(self._key)
+
+    @property
+    def extra_state_attributes(self):
+        record = self.runtime.last_metric_records.get((self.user_name,self._key))
+        if not record:
+            user = next((u for u in self.runtime.users if u["NAME"]==self.user_name), {})
+            ready = all(user.get(k) for k in ("HEIGHT", "DOB", "SEX"))
+            return {"profile_required":not ready, "awaiting_impedance":ready} if self._key == "body_fat" else {}
+        return {"measurement_id":record["measurement_id"], "measured_at":record["timestamp"], "estimated":self._key=="body_fat"}
 
 
 class XiaomiScalePendingSensor(XiaomiScaleBaseSensor):

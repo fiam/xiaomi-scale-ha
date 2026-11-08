@@ -1,43 +1,21 @@
-name: Publish Docker image
-on:
-  release:
-    types: [published]
-
+name: Test
+on: [push, pull_request, workflow_dispatch]
+permissions:
+  contents: read
 jobs:
-  push_to_registry:
-    name: Push Docker image to Docker Hub
+  pure-python:
     runs-on: ubuntu-latest
     steps:
-      - name: Check out the repo
-        uses: actions/checkout@v2
-
-      - name: Set up Docker Buildx
-        id: buildx
-        uses: docker/setup-buildx-action@v1
-
-      - name: Set up QEMU
-        uses: docker/setup-qemu-action@v1
-        
-      - name: Login to DockerHub
-        uses: docker/login-action@v1
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
         with:
-          username: ${{ secrets.DOCKERHUB_USERNAME }}
-          password: ${{ secrets.DOCKERHUB_TOKEN }}
-
-      - name: Build Pre-Release image
-        if: "github.event.release.prerelease"
-        run: |
-          docker buildx build --no-cache --push \
-            --tag lolouk44/xiaomi-mi-scale:${{ github.event.release.tag_name }} \
-            --platform linux/386,linux/amd64,linux/arm/v6,linux/arm/v7,linux/arm64/v8 .
-
-      - name: Build Release image
-        if: "!github.event.release.prerelease"
-        run: |
-          docker buildx build --no-cache --push \
-            --tag lolouk44/xiaomi-mi-scale:${{ github.event.release.tag_name }} \
-            --tag lolouk44/xiaomi-mi-scale:latest \
-            --platform linux/386,linux/amd64,linux/arm/v6,linux/arm/v7,linux/arm64/v8 .
-
-      - name: Image digest
-        run: echo ${{ steps.docker_build.outputs.digest }}
+          python-version: '3.14'
+      - run: python -m unittest discover -s tests -p 'test_*.py' -v
+  home-assistant:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - run: >-
+          docker run --rm -v "$PWD:/work" -w /work --entrypoint python
+          ghcr.io/home-assistant/home-assistant:2026.10.4
+          -m unittest discover -s tests -p 'test_*.py' -v
