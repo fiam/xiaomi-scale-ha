@@ -212,6 +212,33 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
             selector=next(value for key,value in settings['data_schema'].schema.items() if key.schema=='impedance_wait_seconds')
             self.assertEqual(selector.config['mode'],'box')
 
+    async def test_personal_profile_changes_only_authenticated_person(self):
+        dashboard=importlib.import_module('scale_under_test.dashboard')
+        self.hass.config_entries=types.SimpleNamespace(async_update_entry=Mock())
+        with self.assertRaises(self.mod.HomeAssistantError):
+            await dashboard.update_personal_profile(self.runtime,'unknown',{'HEIGHT':175})
+        with self.assertRaises(__import__('voluptuous').Invalid):
+            await dashboard.update_personal_profile(self.runtime,'a',{'HA_USER_ID':'b'})
+        with self.assertRaises(ValueError):
+            await dashboard.update_personal_profile(self.runtime,'a',{'DOB':'1985-02-29'})
+        self.hass.config_entries.async_update_entry.assert_not_called()
+        result=await dashboard.update_personal_profile(self.runtime,'a',{'HEIGHT':175,'DOB':'1984-02-29','SEX':'male'})
+        self.assertEqual(result,{'NAME':'A','HEIGHT':175,'DOB':'1984-02-29','SEX':'male'})
+        users=self.hass.config_entries.async_update_entry.call_args.kwargs['options']['users']
+        self.assertEqual(users[0]['HA_USER_ID'],'a')
+        self.assertEqual(users[1],USERS[1])
+
+    async def test_dashboard_uses_registered_entity_ids_and_profile_bindings(self):
+        dashboard=importlib.import_module('scale_under_test.dashboard')
+        registry=types.SimpleNamespace(async_get_entity_id=Mock(side_effect=lambda domain,platform,unique:'sensor.renamed_'+unique))
+        with patch.object(dashboard.er,'async_get',return_value=registry):
+            view=await dashboard.ScaleDashboard(self.runtime,'xiaomi-scale').async_load()
+        card=view['views'][0]['cards'][0]
+        self.assertEqual(card['pending_entity'],'sensor.renamed_entry_pending')
+        self.assertEqual(card['people'][0]['weight_entity'],'sensor.renamed_entry_a_weight')
+        self.assertEqual(card['people'][0]['user_id'],'a')
+        self.assertNotIn('DOB',card['people'][0])
+
     async def test_impedance_backfills_but_weight_only_has_no_body_fat(self):
         record=self.runtime.ledger.get(self.mid)
         record.update(status='assigned',user_name='A',impedance=500,has_impedance=True)

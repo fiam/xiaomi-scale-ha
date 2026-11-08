@@ -240,7 +240,7 @@ class XiaomiScaleRuntime:
                 continue
             prefix = f'{DOMAIN}:{self.entry.entry_id}:{record["measurement_id"]}'
             await self._notify(self._user(name), f'{record["weight"]:.2f} kg — is this your measurement?',
-                data={'tag':self._tag(record), 'group':DOMAIN, 'actions':[
+                data={'tag':self._tag(record), 'group':DOMAIN, 'url':f'/{getattr(self, "dashboard_path", "xiaomi-scale")}/overview', 'actions':[
                     {'action':f'{prefix}:claim:{index}', 'title':"That's me", 'authenticationRequired':True},
                     {'action':f'{prefix}:decline:{index}', 'title':'Not me', 'authenticationRequired':True}]})
 

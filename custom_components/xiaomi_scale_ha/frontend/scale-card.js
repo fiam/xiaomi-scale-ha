@@ -53,6 +53,48 @@ class XiaomiScaleCard extends HTMLElement {
     } catch (error) { this._error = error.message || String(error); }
     finally { this._busy = false; this._render(); }
   }
+  async _openProfile() {
+    try {
+      const profile = await this._hass.callWS({type:'xiaomi_scale_ha/profile',entry_id:this._config.entry_id});
+      const host = node('div'); const shadow = host.attachShadow({mode:'open'});
+      const style = node('style');
+      style.textContent = `
+        dialog{box-sizing:border-box;width:min(500px,calc(100vw - 32px));max-height:calc(100dvh - 32px);overflow:auto;border:1px solid var(--divider-color);border-radius:var(--ha-dialog-border-radius,28px);padding:24px;background:var(--card-background-color,#fff);color:var(--primary-text-color,#212121);font-family:var(--paper-font-body1_-_font-family,Roboto,sans-serif)}
+        dialog::backdrop{background:rgba(0,0,0,.5)}header{display:flex;align-items:center;justify-content:space-between;margin-bottom:24px}h2{font-size:24px;font-weight:400;margin:0}label{display:flex;flex-direction:column;gap:8px;margin-bottom:20px;font-size:14px}input,select{box-sizing:border-box;width:100%;min-width:0;height:48px;font:inherit;font-size:16px;padding:8px 12px;background:var(--secondary-background-color,#eee);border:1px solid var(--divider-color,#ccc);border-radius:4px;color:inherit}fieldset{padding:0;border:0;margin:0}legend{margin-bottom:12px;font-size:14px}.date{display:grid;grid-template-columns:1fr 1.6fr 1.2fr;gap:12px}footer{display:flex;justify-content:flex-end;gap:8px;margin-top:12px}button{font:inherit;cursor:pointer;border:0;border-radius:24px;background:none;color:var(--primary-color,#03a9f4);padding:10px 20px;min-height:44px}.save{background:var(--primary-color,#03a9f4);color:var(--text-primary-color,#fff)}.close{font-size:26px;padding:0 8px}.error{font-size:14px;color:var(--error-color,#db4437);margin-bottom:12px}:focus-visible{outline:2px solid var(--primary-color);outline-offset:2px}
+      `;
+      const dialog = node('dialog');dialog.setAttribute('aria-label',`${profile.NAME}’s profile`);
+      const heading = node('header');heading.append(node('h2',`${profile.NAME}’s profile`));
+      const close = node('button','×','close');close.type='button';close.setAttribute('aria-label','Close profile');heading.append(close);dialog.append(heading);
+      const form = node('form');
+      const field = (title,type,value,min,max) => { const label=node('label',title);const input=node('input');input.type=type;input.value=value ?? '';if(min!=null)input.min=min;if(max!=null)input.max=max;label.append(input);return [label,input]; };
+      const [heightLabel,height]=field('Height (cm)','number',profile.HEIGHT,30,250);height.step='1';form.append(heightLabel);
+      const birth=node('fieldset');birth.append(node('legend','Date of birth'));const dateRow=node('div',undefined,'date');
+      const parts=(profile.DOB || '').split('-');
+      const [dayLabel,day]=field('Day','number',parts[2],1,31);
+      const monthLabel=node('label','Month');const month=node('select');monthLabel.append(month);
+      ['', 'January','February','March','April','May','June','July','August','September','October','November','December'].forEach((name,i)=>{const opt=node('option',name||'—');opt.value=i ? String(i) : '';month.append(opt);});month.value=parts[1] ? String(Number(parts[1])) : '';
+      const [yearLabel,year]=field('Year','number',parts[0],1900,new Date().getFullYear());
+      dateRow.append(dayLabel,monthLabel,yearLabel);birth.append(dateRow);form.append(birth);
+      const sexLabel=node('label','Sex used by the body-fat formula');const sex=node('select');
+      [['','Not set'],['male','Male'],['female','Female']].forEach(([value,label])=>{const opt=node('option',label);opt.value=value;sex.append(opt);});sex.value=profile.SEX || '';sexLabel.append(sex);form.append(sexLabel);
+      const error=node('div',undefined,'error');error.setAttribute('role','alert');form.append(error);
+      const footer=node('footer');const cancel=node('button','Cancel');cancel.type='button';const save=node('button','Save','save');save.type='submit';footer.append(cancel,save);form.append(footer);dialog.append(form);
+      const cleanup=()=>{dialog.close();host.remove();};close.onclick=cleanup;cancel.onclick=cleanup;dialog.addEventListener('cancel',()=>host.remove());
+      form.addEventListener('submit',async event=>{
+        event.preventDefault();error.textContent='';
+        const hasDate = day.value || month.value || year.value;
+        if (hasDate && !(day.value && month.value && year.value)) {error.textContent='Enter the day, month and year.';return;}
+        const dob=hasDate ? `${year.value.padStart(4,'0')}-${month.value.padStart(2,'0')}-${day.value.padStart(2,'0')}` : null;
+        save.disabled=true;
+        try {
+          await this._hass.callWS({type:'xiaomi_scale_ha/profile',entry_id:this._config.entry_id,
+            changes:{HEIGHT:height.value ? Number(height.value) : null,DOB:dob,SEX:sex.value || null}});
+          cleanup();this._notice='Profile saved.';this._render();
+        } catch(err) {error.textContent=err.message || String(err);save.disabled=false;}
+      });
+      shadow.append(style,dialog);document.body.append(host);dialog.showModal();
+    } catch(error) {this._error=error.message || String(error);this._render();}
+  }
   _metric(label, value, unit, subtitle) {
     const box = node('div',undefined,'metric');
     const labelRow = node('div',undefined,'label');
@@ -149,7 +191,7 @@ class XiaomiScaleCard extends HTMLElement {
     `;
     const wrap = node('main',undefined,'wrap');
     const header = node('header');
-    if (this._hass.user?.is_admin) { const link=node('a','Profile settings');link.href='/config/integrations/integration/xiaomi_scale_ha';header.append(link); }
+    if (me) header.append(this._button('Profile settings',()=>this._openProfile()));
     wrap.append(header);
     if (this._notice || this._error) { const message=node('div',this._error || this._notice,this._error ? 'error' : 'notice');message.setAttribute('role',this._error ? 'alert' : 'status');wrap.append(message); }
     const pendingCard=node('ha-card',undefined,pending.length ? 'pending' : '');

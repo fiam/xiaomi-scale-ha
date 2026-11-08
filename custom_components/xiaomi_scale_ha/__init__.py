@@ -7,7 +7,7 @@ from time import monotonic
 
 import voluptuous as vol
 
-from homeassistant.components import bluetooth
+from homeassistant.components import bluetooth, frontend, websocket_api
 from homeassistant.components.http import StaticPathConfig
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import Platform
@@ -26,6 +26,7 @@ from .const import (
     SIGNAL_MEASUREMENT,
 )
 from .parser import parse_service_info
+from .dashboard import async_setup_dashboard, websocket_profile
 from .runtime import XiaomiScaleRuntime
 
 PLATFORMS = [Platform.SENSOR]
@@ -58,6 +59,11 @@ async def async_setup(hass: HomeAssistant, config: dict[str, Any]) -> bool:
         StaticPathConfig('/xiaomi_scale_ha/scale-card.js',
                          str(Path(__file__).parent / 'frontend/scale-card.js'), False)
     ])
+
+    from homeassistant.loader import async_get_integration
+    integration = await async_get_integration(hass, DOMAIN)
+    frontend.add_extra_js_url(hass, f'/xiaomi_scale_ha/scale-card.js?v={integration.version}')
+    websocket_api.async_register_command(hass, websocket_profile)
 
     async def _async_respond_pending(call: ServiceCall) -> None:
         runtime = _runtime_from_call(hass, call)
@@ -186,6 +192,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     )
     runtime.last_diagnostic = {"state": "listening", "mac": runtime.mac}
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
+    await async_setup_dashboard(runtime)
     entry.async_on_unload(entry.add_update_listener(_async_options_updated))
     return True
 
