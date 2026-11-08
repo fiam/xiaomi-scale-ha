@@ -14,6 +14,7 @@ class XiaomiScaleCard extends HTMLElement {
     this.attachShadow({mode:'open'});
     this._expanded = new Set();
     this._busy = false;
+    this._charts = new Map();
   }
   setConfig(config) {
     if (!config.pending_entity || !config.history_entity || !Array.isArray(config.people)) throw new Error('Configure pending_entity, history_entity and people');
@@ -23,6 +24,7 @@ class XiaomiScaleCard extends HTMLElement {
   }
   set hass(hass) {
     this._hass = hass;
+    for (const chart of this._charts.values()) chart.hass = hass;
     const c = this._config;
     if (!c) return;
     const entities = [c.pending_entity,c.history_entity,...c.people.flatMap(p => [p.weight_entity,p.body_fat_entity])];
@@ -32,7 +34,8 @@ class XiaomiScaleCard extends HTMLElement {
   getCardSize() { return 12; }
   getGridOptions() { return {columns:12, rows:'auto'}; }
   _button(label, action, primary = false) {
-    const button = node('button',label,primary ? 'primary' : '');
+    const button = node('ha-button',label);
+    button.setAttribute('appearance', primary ? 'filled' : 'plain');
     button.type = 'button';
     button.disabled = this._busy;
     button.addEventListener('click', action);
@@ -52,7 +55,9 @@ class XiaomiScaleCard extends HTMLElement {
   }
   _metric(label, value, unit, subtitle) {
     const box = node('div',undefined,'metric');
-    box.append(node('div',label,'label'));
+    const labelRow = node('div',undefined,'label');
+    const icon = node('ha-icon'); icon.setAttribute('icon',label === 'Weight' ? 'mdi:scale-bathroom' : 'mdi:water-percent');
+    labelRow.append(icon,node('span',label));box.append(labelRow);
     const amount = node('div',number(value),'amount'); amount.append(node('span',unit,'unit')); box.append(amount);
     if (subtitle) box.append(node('div',subtitle,'muted'));
     return box;
@@ -74,6 +79,26 @@ class XiaomiScaleCard extends HTMLElement {
     const fatHint = f != null ? date(fat.attributes.measured_at) : latest ? (latest.impedance ? 'Add profile details' : 'No impedance recorded') : '';
     metrics.append(this._metric('Body fat', f, '%',fatHint));
     card.append(metrics);
+    if (rows.length > 1) {
+      const delta = Number(rows[0].weight) - Number(rows[1].weight);
+      card.append(node('div',`${delta > 0 ? '+' : ''}${number(delta)} kg since previous reading`,'muted change'));
+    }
+    if (own && rows.length) {
+      let chart = this._charts.get(person.name);
+      if (chart) { chart.hass = this._hass; card.append(chart); }
+      else if (window.loadCardHelpers && !this._loadingCharts) {
+        this._loadingCharts = true;
+        window.loadCardHelpers().then(helpers => {
+          const native = helpers.createCardElement({type:'history-graph', title:'Trends · 14 days', hours_to_show:336,
+            entities:[{entity:person.weight_entity,name:'Weight'},{entity:person.body_fat_entity,name:'Body fat'}]});
+          native.hass = this._hass;
+          native.className = 'trend';
+          this._charts.set(person.name,native);
+          this._loadingCharts = false;
+          this._render();
+        }).catch(() => { this._loadingCharts = false; });
+      }
+    }
     if (rows.length) {
       const table = node('table');
       const caption = node('caption', own ? 'Recent readings' : 'Recent readings'); table.append(caption);
@@ -97,25 +122,24 @@ class XiaomiScaleCard extends HTMLElement {
     const style = node('style');
     style.textContent = `
       :host{display:block;color:var(--primary-text-color);font-family:var(--paper-font-body1_-_font-family,inherit)}
-      *{box-sizing:border-box} .wrap{max-width:920px;margin:24px auto;padding:0 20px 32px}
+      *{box-sizing:border-box}.wrap{max-width:900px;margin:0 auto;padding:16px}
       header,.section-head,.row-head{display:flex;align-items:center;justify-content:space-between;gap:16px}
-      header{margin:0 0 24px} h1{font-size:28px;letter-spacing:-.5px;margin:0}h2{font-size:19px;margin:0;font-weight:600}
-      .subtitle{margin-top:5px;color:var(--secondary-text-color);font-size:14px}a{color:var(--primary-color);text-decoration:none;font-size:14px}
-      ha-card{display:block;margin:0 0 20px;padding:24px;border-radius:20px;border:1px solid var(--divider-color);background:var(--ha-card-background,var(--card-background-color));box-shadow:none}
-      .pending{border-color:color-mix(in srgb,var(--primary-color) 50%,transparent)}
-      .section-head{margin-bottom:20px}.pill{font-size:12px;padding:5px 10px;border-radius:20px;background:var(--secondary-background-color);white-space:nowrap}
-      .reading+.reading{border-top:1px solid var(--divider-color);margin-top:20px;padding-top:20px}.reading-weight{font-size:30px;font-weight:600;letter-spacing:-.5px}
-      .unit{font-size:16px;font-weight:400;color:var(--secondary-text-color);margin-left:7px}.muted{font-size:13px;color:var(--secondary-text-color);line-height:1.5;margin-top:5px}
-      .actions{display:flex;gap:10px;margin-top:18px;flex-wrap:wrap}button,select{font:inherit;border-radius:12px;min-height:44px;padding:10px 18px;border:1px solid var(--divider-color);background:transparent;color:var(--primary-text-color)}
-      button{cursor:pointer;font-weight:600}button.primary{background:var(--primary-color);border-color:var(--primary-color);color:var(--text-primary-color,#fff)}button:disabled{opacity:.5;cursor:wait}button:focus-visible,a:focus-visible,summary:focus-visible{outline:2px solid var(--primary-color);outline-offset:4px}
-      .metrics{display:grid;grid-template-columns:1fr 1fr;gap:24px}.label{font-size:14px;color:var(--secondary-text-color)}.amount{font-size:38px;font-weight:600;margin-top:6px;letter-spacing:-1px}
-      .table-wrap{overflow-x:auto;margin-top:24px}table{border-collapse:collapse;width:100%;font-size:14px;white-space:nowrap}caption{text-align:left;font-size:14px;font-weight:600;margin-bottom:12px}th{text-align:right;font-size:12px;font-weight:500;color:var(--secondary-text-color)}td,th{padding:12px 8px;border-bottom:1px solid var(--divider-color)}td{text-align:right}td:first-child,th:first-child{text-align:left;padding-left:0}tr:last-child td{border-bottom:0}
-      details.others>summary{cursor:pointer;padding:6px 0 20px;font-size:16px;font-weight:600;color:var(--secondary-text-color)}.notice{padding:12px 0;color:var(--primary-color)}.error{padding:12px 0;color:var(--error-color)}.empty{display:flex;align-items:center;gap:10px;font-size:14px;color:var(--secondary-text-color)}.empty .check{color:var(--success-color,#4caf50);font-size:20px}
-      details.admin{margin-top:18px}details.admin summary{font-size:13px;color:var(--secondary-text-color);cursor:pointer}.admin .actions{margin-top:10px}select{max-width:100%}option{background:var(--card-background-color)}
-      @media(max-width:600px){.wrap{margin:16px auto;padding:0 12px 20px}ha-card{padding:20px;border-radius:16px}h1{font-size:25px}header{align-items:flex-start}.metrics{gap:16px}.amount{font-size:32px}td,th{font-size:12px;padding:10px 6px}.row-head{align-items:flex-start}.reading-weight{font-size:28px}}
+      header{justify-content:flex-end;margin-bottom:12px}h2{font-size:20px;margin:0;font-weight:400}a{color:var(--primary-color);text-decoration:none;font-size:14px}
+      ha-card{display:block;margin-bottom:16px;padding:16px;border-radius:var(--ha-card-border-radius,12px);box-shadow:var(--ha-card-box-shadow,none)}
+      .section-head{margin-bottom:20px}.pill{font-size:14px;color:var(--secondary-text-color)}
+      .reading+.reading{border-top:1px solid var(--divider-color);margin-top:16px;padding-top:16px}.reading-weight{font-size:28px;font-weight:400}
+      .unit{font-size:16px;font-weight:400;color:var(--secondary-text-color);margin-left:5px}.muted{font-size:13px;color:var(--secondary-text-color);line-height:1.5;margin-top:4px}
+      .actions{display:flex;gap:8px;margin-top:12px;flex-wrap:wrap;align-items:center}ha-button{min-height:40px}select{font:inherit;border-radius:4px;min-height:40px;padding:8px 12px;border:1px solid var(--divider-color);background:var(--card-background-color);color:var(--primary-text-color)}
+      a:focus-visible,summary:focus-visible{outline:2px solid var(--primary-color);outline-offset:4px}
+      .metrics{display:grid;grid-template-columns:1fr 1fr;gap:16px}.label{display:flex;align-items:center;gap:8px;font-size:14px;color:var(--secondary-text-color)}ha-icon{--mdc-icon-size:20px;color:var(--state-icon-color)}.amount{font-size:28px;font-weight:400;margin:8px 0 0 28px}.metric>.muted{margin-left:28px}.change{margin:16px 0 0 28px}
+      .trend{display:block;margin:16px -16px 0;--ha-card-border-width:0;--ha-card-box-shadow:none;--ha-card-border-radius:0}
+      .table-wrap{overflow-x:auto;margin-top:24px}table{border-collapse:collapse;width:100%;font-size:14px;white-space:nowrap}caption{text-align:left;font-size:16px;font-weight:400;margin-bottom:12px}th{text-align:right;font-size:12px;font-weight:500;color:var(--secondary-text-color)}td,th{padding:12px 8px;border-bottom:1px solid var(--divider-color)}td{text-align:right}td:first-child,th:first-child{text-align:left;padding-left:0}tr:last-child td{border-bottom:0}
+      details.others>summary{cursor:pointer;padding:8px 0 16px;font-size:16px;font-weight:400;color:var(--primary-text-color)}.notice{padding:0 0 12px;color:var(--primary-color)}.error{padding:0 0 12px;color:var(--error-color)}.empty{display:flex;align-items:center;gap:12px;font-size:14px;color:var(--secondary-text-color)}.empty .check{color:var(--success-color,#4caf50);font-size:20px}
+      details.admin{margin-top:16px}details.admin summary{font-size:13px;color:var(--secondary-text-color);cursor:pointer}.admin .actions{margin-top:8px}select{max-width:100%}
+      @media(max-width:600px){.wrap{padding:8px}h2{font-size:20px}.metrics{gap:8px}.amount{font-size:26px}td,th{font-size:12px;padding:10px 6px}.row-head{align-items:flex-start}.reading-weight{font-size:26px}}
     `;
     const wrap = node('main',undefined,'wrap');
-    const header = node('header'); const title = node('div');title.append(node('h1','Scale'),node('div','Your household’s measurements','subtitle'));header.append(title);
+    const header = node('header');
     if (this._hass.user?.is_admin) { const link=node('a','Profile settings');link.href='/config/integrations/integration/xiaomi_scale_ha';header.append(link); }
     wrap.append(header);
     if (this._notice || this._error) { const message=node('div',this._error || this._notice,this._error ? 'error' : 'notice');message.setAttribute('role',this._error ? 'alert' : 'status');wrap.append(message); }

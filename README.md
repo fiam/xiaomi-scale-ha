@@ -30,7 +30,8 @@ applies to `custom_components/xiaomi_scale_ha`.
 - Weight-only readings have no body-fat estimate. Earlier records keep their own
   impedance and estimates; values are never carried across readings.
 - A dashboard card with account-bound confirmation buttons, personal history first
-  and expandable household measurements.
+  and expandable household measurements. Native HA charts show 14-day weight
+  and body-fat trends; the card also shows the change since the previous reading.
 - Separate weigh-ins of the same weight are preserved; packets from one physical
   weighing session are combined.
 
@@ -110,7 +111,7 @@ Home Assistant Recorder states.
 ## Dashboard
 
 Add a JavaScript module resource under **Settings → Dashboards → Resources**:
-`/xiaomi_scale_ha/scale-card.js?v=0.3.0`. The integration serves this file after HA
+`/xiaomi_scale_ha/scale-card.js?v=0.3.1`. The integration serves this file after HA
 restarts. Use a panel view and this card (replace the sample entity names and IDs):
 
 ```yaml
