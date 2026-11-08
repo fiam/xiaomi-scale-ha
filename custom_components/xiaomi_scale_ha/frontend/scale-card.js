@@ -76,7 +76,7 @@ class XiaomiScaleCard extends HTMLElement {
     const f = fat && !['unknown','unavailable'].includes(fat.state) ? Number(fat.state) : null;
     const latest = rows[0];
     metrics.append(this._metric('Weight', w, 'kg', latest ? date(latest.timestamp) : 'No measurements yet'));
-    const fatHint = f != null ? date(fat.attributes.measured_at) : latest ? (latest.impedance ? 'Add profile details' : 'No impedance recorded') : '';
+    const fatHint = f != null ? date(fat.attributes.measured_at) : latest ? (latest.impedance ? 'Add profile details' : 'No estimate') : '';
     metrics.append(this._metric('Body fat', f, '%',fatHint));
     card.append(metrics);
     if (rows.length > 1) {
@@ -102,10 +102,10 @@ class XiaomiScaleCard extends HTMLElement {
     if (rows.length) {
       const table = node('table');
       const caption = node('caption', own ? 'Recent readings' : 'Recent readings'); table.append(caption);
-      const head = node('tr'); ['Date','Weight','Body fat','Impedance'].forEach(t => head.append(node('th',t))); table.append(head);
+      const head = node('tr'); ['Date','Weight','Body fat'].forEach(t => head.append(node('th',t))); table.append(head);
       for (const row of rows) {
         const tr = node('tr');
-        [date(row.timestamp),`${number(row.weight)} kg`,row.body_fat == null ? '—' : `${number(row.body_fat,1)}%`,row.impedance == null ? '—' : `${number(row.impedance,0)} Ω`].forEach(t => tr.append(node('td',t)));
+        [date(row.timestamp),`${number(row.weight)} kg`,row.body_fat == null ? '—' : `${number(row.body_fat,1)}%`].forEach(t => tr.append(node('td',t)));
         table.append(tr);
       }
       const scroll = node('div',undefined,'table-wrap'); scroll.append(table);card.append(scroll);
@@ -150,7 +150,6 @@ class XiaomiScaleCard extends HTMLElement {
       const heading=node('div',undefined,'section-head');heading.append(node('h2','Confirm a reading'),node('span',String(pending.length),'pill'));pendingCard.append(heading);
       for (const record of pending) {
         const reading=node('div',undefined,'reading');const row=node('div',undefined,'row-head');const value=node('div',number(record.weight),'reading-weight');value.append(node('span','kg','unit'));row.append(value,node('span',date(record.timestamp),'muted'));reading.append(row);
-        reading.append(node('div',record.impedance ? `${number(record.impedance,0)} Ω impedance` : 'No impedance recorded','muted'));
         const eligible=me && record.candidates?.includes(me.name) && !record.declined?.includes(me.name);
         const expired=Date.now()-new Date(record.timestamp).getTime()>86400000;
         if (eligible && !expired) { const actions=node('div',undefined,'actions');actions.append(this._button("That’s me",()=>this._respond(record,'claim'),true),this._button('Not me',()=>this._respond(record,'decline')));reading.append(actions); }
