@@ -111,7 +111,7 @@ Home Assistant Recorder states.
 ## Dashboard
 
 Add a JavaScript module resource under **Settings → Dashboards → Resources**:
-`/xiaomi_scale_ha/scale-card.js?v=0.3.1`. The integration serves this file after HA
+`/xiaomi_scale_ha/scale-card.js?v=0.3.2`. The integration serves this file after HA
 restarts. Use a panel view and this card (replace the sample entity names and IDs):
 
 ```yaml

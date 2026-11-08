@@ -85,14 +85,23 @@ class XiaomiScaleCard extends HTMLElement {
     }
     if (own && rows.length) {
       let chart = this._charts.get(person.name);
-      if (chart) { chart.hass = this._hass; card.append(chart); }
+      if (chart) {
+        const hasFat = rows.some(r=>r.body_fat != null);
+        if (chart._scaleHasFat !== hasFat) {
+          chart.setConfig({type:'history-graph',title:'Trends · 14 days',hours_to_show:336,fit_y_data:true,
+            entities:[{entity:person.weight_entity,name:'Weight'},...(hasFat ? [{entity:person.body_fat_entity,name:'Body fat'}] : [])]});
+          chart._scaleHasFat = hasFat;
+        }
+        chart.hass = this._hass; card.append(chart);
+      }
       else if (window.loadCardHelpers && !this._loadingCharts) {
         this._loadingCharts = true;
         window.loadCardHelpers().then(helpers => {
-          const native = helpers.createCardElement({type:'history-graph', title:'Trends · 14 days', hours_to_show:336,
-            entities:[{entity:person.weight_entity,name:'Weight'},{entity:person.body_fat_entity,name:'Body fat'}]});
+          const native = helpers.createCardElement({type:'history-graph', title:'Trends · 14 days', hours_to_show:336, fit_y_data:true,
+            entities:[{entity:person.weight_entity,name:'Weight'},...(rows.some(r=>r.body_fat != null) ? [{entity:person.body_fat_entity,name:'Body fat'}] : [])]});
           native.hass = this._hass;
           native.className = 'trend';
+          native._scaleHasFat = rows.some(r=>r.body_fat != null);
           this._charts.set(person.name,native);
           this._loadingCharts = false;
           this._render();
@@ -125,14 +134,14 @@ class XiaomiScaleCard extends HTMLElement {
       *{box-sizing:border-box}.wrap{max-width:900px;margin:0 auto;padding:16px}
       header,.section-head,.row-head{display:flex;align-items:center;justify-content:space-between;gap:16px}
       header{justify-content:flex-end;margin-bottom:12px}h2{font-size:20px;margin:0;font-weight:400}a{color:var(--primary-color);text-decoration:none;font-size:14px}
-      ha-card{display:block;margin-bottom:16px;padding:16px;border-radius:var(--ha-card-border-radius,12px);box-shadow:var(--ha-card-box-shadow,none)}
+      ha-card{display:block;margin-bottom:16px;padding:16px;border:1px solid var(--ha-card-border-color,var(--divider-color));border-radius:12px;box-shadow:var(--ha-card-box-shadow,none)}
       .section-head{margin-bottom:20px}.pill{font-size:14px;color:var(--secondary-text-color)}
       .reading+.reading{border-top:1px solid var(--divider-color);margin-top:16px;padding-top:16px}.reading-weight{font-size:28px;font-weight:400}
       .unit{font-size:16px;font-weight:400;color:var(--secondary-text-color);margin-left:5px}.muted{font-size:13px;color:var(--secondary-text-color);line-height:1.5;margin-top:4px}
       .actions{display:flex;gap:8px;margin-top:12px;flex-wrap:wrap;align-items:center}ha-button{min-height:40px}select{font:inherit;border-radius:4px;min-height:40px;padding:8px 12px;border:1px solid var(--divider-color);background:var(--card-background-color);color:var(--primary-text-color)}
       a:focus-visible,summary:focus-visible{outline:2px solid var(--primary-color);outline-offset:4px}
       .metrics{display:grid;grid-template-columns:1fr 1fr;gap:16px}.label{display:flex;align-items:center;gap:8px;font-size:14px;color:var(--secondary-text-color)}ha-icon{--mdc-icon-size:20px;color:var(--state-icon-color)}.amount{font-size:28px;font-weight:400;margin:8px 0 0 28px}.metric>.muted{margin-left:28px}.change{margin:16px 0 0 28px}
-      .trend{display:block;margin:16px -16px 0;--ha-card-border-width:0;--ha-card-box-shadow:none;--ha-card-border-radius:0}
+      .trend{--chart-max-height:220px;display:block;margin:16px -16px 0;--ha-card-border-width:0;--ha-card-box-shadow:none;--ha-card-border-radius:0}
       .table-wrap{overflow-x:auto;margin-top:24px}table{border-collapse:collapse;width:100%;font-size:14px;white-space:nowrap}caption{text-align:left;font-size:16px;font-weight:400;margin-bottom:12px}th{text-align:right;font-size:12px;font-weight:500;color:var(--secondary-text-color)}td,th{padding:12px 8px;border-bottom:1px solid var(--divider-color)}td{text-align:right}td:first-child,th:first-child{text-align:left;padding-left:0}tr:last-child td{border-bottom:0}
       details.others>summary{cursor:pointer;padding:8px 0 16px;font-size:16px;font-weight:400;color:var(--primary-text-color)}.notice{padding:0 0 12px;color:var(--primary-color)}.error{padding:0 0 12px;color:var(--error-color)}.empty{display:flex;align-items:center;gap:12px;font-size:14px;color:var(--secondary-text-color)}.empty .check{color:var(--success-color,#4caf50);font-size:20px}
       details.admin{margin-top:16px}details.admin summary{font-size:13px;color:var(--secondary-text-color);cursor:pointer}.admin .actions{margin-top:8px}select{max-width:100%}
