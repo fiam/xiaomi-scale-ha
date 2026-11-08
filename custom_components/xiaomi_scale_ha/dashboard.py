@@ -99,7 +99,7 @@ class ScaleDashboard(LovelaceConfig):
 async def async_setup_dashboard(runtime):
     hass = runtime.hass
     data = hass.data[LOVELACE_DATA]
-    path = runtime.entry.options.get('dashboard_path', 'xiaomi-scale')
+    path = runtime.entry.options.get('dashboard_path', 'household-scale')
     existing = data.dashboards.get(path)
     if existing is not None and not (isinstance(existing, ScaleDashboard) and existing.runtime.entry.entry_id == runtime.entry.entry_id):
         # Never replace an unrelated dashboard, including a manual one with this URL.
