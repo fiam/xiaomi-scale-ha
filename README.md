@@ -111,9 +111,11 @@ Home Assistant Recorder states.
 ## Dashboard and personal profiles
 
 The integration creates a **Scale** sidebar dashboard and registers its frontend
-module automatically. It resolves sensor IDs from HA's entity registry, so renamed
-entities work without editing dashboard YAML. No external dashboard file or resource
-entry is required. The default URL is `/household-scale/overview`; multiple scale entries
+module automatically in Lovelace's resource list, including version updates. This
+also loads the card when a browser uses a cached Home Assistant page. It resolves
+sensor IDs from HA's entity registry, so renamed entities work without editing
+dashboard YAML. No manually maintained dashboard file or resource entry is required.
+The default URL is `/household-scale/overview`; multiple scale entries
 get separate paths when needed. Existing unrelated dashboards are never overwritten.
 
 Pending readings appear first, followed by the signed-in person's readings and

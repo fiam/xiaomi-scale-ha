@@ -140,6 +140,57 @@ class ParserTests(unittest.TestCase):
         self.assertEqual(self.parse('02 26 b2 07 03 04 17 37 23 f4 01 98 3a').impedance,500)
 
 HAS_HA = importlib.util.find_spec('homeassistant') is not None
+@unittest.skipUnless(HAS_HA,'run inside HA Python for frontend registration checks')
+class FrontendTests(unittest.IsolatedAsyncioTestCase):
+    async def asyncSetUp(self):
+        self.mod = importlib.import_module('scale_under_test.frontend')
+        self.resources_module = importlib.import_module('homeassistant.components.lovelace.resources')
+        self.storage = types.SimpleNamespace(async_load=AsyncMock(return_value={'items':[]}),
+                                             async_delay_save=Mock())
+        with patch.object(self.resources_module.storage,'Store',return_value=self.storage):
+            self.resources = self.resources_module.ResourceStorageCollection(Mock(),Mock())
+        self.hass = types.SimpleNamespace(data={self.mod.LOVELACE_DATA:types.SimpleNamespace(resources=self.resources)},
+            http=types.SimpleNamespace(async_register_static_paths=AsyncMock()))
+
+    async def test_setup_exposes_card_to_clients_without_html_module_loader(self):
+        with patch.object(self.mod,'async_get_integration',AsyncMock(return_value=types.SimpleNamespace(version='1.2.3'))), \
+             patch.object(self.mod.frontend,'add_extra_js_url') as html_loader:
+            await self.mod.async_setup_frontend(self.hass)
+        item, = self.resources.async_items()
+        self.assertEqual(item['url'],self.mod.CARD_URL+'?v=1.2.3')
+        self.assertEqual(item['type'],'module')
+        html_loader.assert_not_called()
+        route, = self.hass.http.async_register_static_paths.call_args.args[0]
+        self.assertEqual(route.url_path,self.mod.CARD_URL)
+        self.assertTrue(Path(route.path).is_file())
+
+    async def test_upgrade_replaces_old_versions_preserves_other_resources(self):
+        unrelated={'id':'other','url':'https://example.com'+self.mod.CARD_URL,'type':'module'}
+        self.storage.async_load.return_value={'items':[unrelated,
+            {'id':'card','url':self.mod.CARD_URL+'?v=0.1','type':'js'},
+            {'id':'duplicate','url':self.mod.CARD_URL+'?v=0.2','type':'module'}]}
+        await self.mod.async_register_card_resource(self.hass,'1.2.3')
+        self.assertEqual(self.resources.async_items(),[unrelated,
+            {'id':'card','url':self.mod.CARD_URL+'?v=1.2.3','type':'module'}])
+
+    async def test_repeated_setup_does_not_create_or_save_duplicates(self):
+        await self.mod.async_register_card_resource(self.hass,'1.2.3')
+        first=deepcopy(self.resources.async_items())
+        self.storage.async_delay_save.reset_mock()
+        await self.mod.async_register_card_resource(self.hass,'1.2.3')
+        self.assertEqual(self.resources.async_items(),first)
+        self.storage.async_delay_save.assert_not_called()
+
+    async def test_yaml_resources_remain_in_memory_and_preserve_other_cards(self):
+        other={'url':'/local/other.js','type':'module'}
+        yaml=self.resources_module.ResourceYAMLCollection([other])
+        self.hass.data[self.mod.LOVELACE_DATA].resources=yaml
+        with patch.object(self.mod.frontend,'add_extra_js_url'):
+            await self.mod.async_register_card_resource(self.hass,'1.2.3')
+            await self.mod.async_register_card_resource(self.hass,'1.2.4')
+        self.assertEqual(yaml.async_items(),[other,{'url':self.mod.CARD_URL+'?v=1.2.4','type':'module'}])
+        self.storage.async_delay_save.assert_not_called()
+
 @unittest.skipUnless(HAS_HA,'run inside HA Python for runtime and config checks')
 class RuntimeTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):

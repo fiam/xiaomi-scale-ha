@@ -2,13 +2,11 @@ from __future__ import annotations
 
 import logging
 from typing import Any
-from pathlib import Path
 from time import monotonic
 
 import voluptuous as vol
 
-from homeassistant.components import bluetooth, frontend, websocket_api
-from homeassistant.components.http import StaticPathConfig
+from homeassistant.components import bluetooth, websocket_api
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import Platform
 from homeassistant.core import Event, HomeAssistant, ServiceCall, callback
@@ -27,6 +25,7 @@ from .const import (
 )
 from .parser import parse_service_info
 from .dashboard import async_setup_dashboard, websocket_profile
+from .frontend import async_setup_frontend
 from .runtime import XiaomiScaleRuntime
 
 PLATFORMS = [Platform.SENSOR]
@@ -55,14 +54,7 @@ DELETE_HISTORY_SCHEMA = vol.Schema(
 
 
 async def async_setup(hass: HomeAssistant, config: dict[str, Any]) -> bool:
-    await hass.http.async_register_static_paths([
-        StaticPathConfig('/xiaomi_scale_ha/scale-card.js',
-                         str(Path(__file__).parent / 'frontend/scale-card.js'), False)
-    ])
-
-    from homeassistant.loader import async_get_integration
-    integration = await async_get_integration(hass, DOMAIN)
-    frontend.add_extra_js_url(hass, f'/xiaomi_scale_ha/scale-card.js?v={integration.version}')
+    await async_setup_frontend(hass)
     websocket_api.async_register_command(hass, websocket_profile)
 
     async def _async_respond_pending(call: ServiceCall) -> None:
