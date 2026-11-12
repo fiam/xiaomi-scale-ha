@@ -24,7 +24,7 @@ from .const import (
     SIGNAL_MEASUREMENT,
 )
 from .parser import parse_service_info
-from .dashboard import async_setup_dashboard, websocket_profile
+from .dashboard import async_setup_dashboard, websocket_profile, websocket_history
 from .frontend import async_setup_frontend
 from .runtime import XiaomiScaleRuntime
 
@@ -56,6 +56,7 @@ DELETE_HISTORY_SCHEMA = vol.Schema(
 async def async_setup(hass: HomeAssistant, config: dict[str, Any]) -> bool:
     await async_setup_frontend(hass)
     websocket_api.async_register_command(hass, websocket_profile)
+    websocket_api.async_register_command(hass, websocket_history)
 
     async def _async_respond_pending(call: ServiceCall) -> None:
         runtime = _runtime_from_call(hass, call)

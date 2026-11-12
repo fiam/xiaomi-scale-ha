@@ -1,0 +1,26 @@
+<!doctype html><html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Scale card preview</title>
+<style>
+:root{font-family:Roboto,Arial,sans-serif;--primary-color:#03a9f4;--accent-color:#ff9800;--primary-text-color:#e1e1e1;--secondary-text-color:#9b9b9b;--card-background-color:#1c1c1c;--secondary-background-color:#282828;--divider-color:#3c3c3c;--state-icon-color:#9b9b9b;--error-color:#db4437;--success-color:#4caf50}
+body{margin:0;background:#111;color:var(--primary-text-color)}body.light{background:#fafafa;--primary-text-color:#212121;--secondary-text-color:#666;--card-background-color:#fff;--secondary-background-color:#f5f5f5;--divider-color:#ddd;--state-icon-color:#666}
+ha-card{background:var(--card-background-color)}ha-icon{display:none}nav{display:flex;gap:8px;padding:12px;align-items:center;flex-wrap:wrap;font-size:14px}button{font:inherit;padding:8px 12px;cursor:pointer}iframe{display:block;border:0;width:100%;height:1000px;margin:auto}
+</style>
+<script type="module">
+const params=new URLSearchParams(location.search);
+if (!params.has('frame')) {
+ const nav=document.createElement('nav');nav.textContent='Synthetic preview';
+ const frame=document.createElement('iframe');frame.title='Scale card preview';frame.src='?frame=1';
+ for(const [label,action] of [['Desktop',()=>frame.style.width='100%'],['Mobile',()=>frame.style.width='375px'],['Toggle theme',()=>frame.contentDocument.body.classList.toggle('light')]]){const button=document.createElement('button');button.textContent=label;button.onclick=action;nav.append(button);}
+ document.body.append(nav,frame);
+} else {
+ customElements.define('ha-button',class extends HTMLElement {
+  connectedCallback(){if(this.shadowRoot)return;const shadow=this.attachShadow({mode:'open'});shadow.innerHTML='<style>:host{display:inline-flex}button{font:inherit;font-size:14px;border:0;background:transparent;color:var(--primary-color);border-radius:20px;padding:10px 14px;cursor:pointer;min-height:40px}:host([appearance="filled"]) button{background:var(--primary-color);color:white}</style><button><slot></slot></button>';}
+ });
+ await import('../custom_components/xiaomi_scale_ha/frontend/scale-card.js');
+ const now=Date.now(),day=86400000;
+ const measurements=[{measurement_id:'1',timestamp:new Date(now-4*day).toISOString(),weight:75,bmi:23.15,unit:'kg'},{measurement_id:'2',timestamp:new Date(now-2*day).toISOString(),weight:74,bmi:22.84,body_fat:22,has_impedance:true,unit:'kg'},{measurement_id:'3',timestamp:new Date(now).toISOString(),weight:74.5,bmi:22.99,unit:'kg'}];
+ const card=document.createElement('xiaomi-scale-card');
+ card.setConfig({entry_id:'preview',pending_entity:'sensor.pending',history_entity:'sensor.history',people:[{name:'Example',user_id:'example',weight_entity:'sensor.weight',body_fat_entity:'sensor.fat',bmi_entity:'sensor.bmi'},{name:'Household member',user_id:'other'}]});
+ card.hass={user:{id:'example',is_admin:true},states:{'sensor.pending':{state:'unknown',attributes:{}},'sensor.history':{state:'3',attributes:{Example:{count:3,measurements}}},'sensor.weight':{state:'74.5'},'sensor.fat':{state:'unknown'},'sensor.bmi':{state:'22.99'}},callWS:async()=>({measurements}),callService:async()=>{}};
+ document.body.append(card);
+}
+</script></html>

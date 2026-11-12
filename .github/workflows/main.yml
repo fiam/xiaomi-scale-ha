@@ -3,6 +3,11 @@ on: [push, pull_request, workflow_dispatch]
 permissions:
   contents: read
 jobs:
+  chart:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - run: node --test tests/test_chart.mjs
   pure-python:
     runs-on: ubuntu-latest
     steps:

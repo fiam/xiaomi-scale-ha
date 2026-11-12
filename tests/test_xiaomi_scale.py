@@ -287,8 +287,46 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         card=view['views'][0]['cards'][0]
         self.assertEqual(card['pending_entity'],'sensor.renamed_entry_pending')
         self.assertEqual(card['people'][0]['weight_entity'],'sensor.renamed_entry_a_weight')
+        self.assertEqual(card['people'][0]['bmi_entity'],'sensor.renamed_entry_a_bmi')
         self.assertEqual(card['people'][0]['user_id'],'a')
         self.assertNotIn('DOB',card['people'][0])
+
+    async def test_chart_history_includes_older_recalculated_values_without_raw_fields(self):
+        dashboard=importlib.import_module('scale_under_test.dashboard')
+        self.runtime.ledger.records=[{
+            **payload(i*86400,weight=75,packet=str(i)), 'status':'assigned',
+            'user_name':'A','measurement_id':str(i),'impedance':500,
+            'packet_ids':['private-packet'],'bmi':23.15,
+            **({'body_fat':20.0} if i==0 else {}),
+        } for i in range(15)]
+        self.runtime.ledger.records.append({**payload(),'status':'pending','user_name':'A'})
+        rows=dashboard.measurement_history(self.runtime,'A')
+        self.assertEqual(len(rows),15)
+        self.assertEqual(rows[0]['body_fat'],20.0)
+        self.assertEqual(rows[0]['timestamp'],payload(0)['timestamp'])
+        self.assertNotIn('body_fat',rows[-1])
+        self.assertNotIn('impedance',rows[0])
+        self.assertNotIn('source_address',rows[0])
+        self.assertNotIn('packet_ids',rows[0])
+        self.assertEqual(dashboard.measurement_history(self.runtime,'B'),[])
+
+    async def test_chart_history_obeys_entity_read_permission(self):
+        dashboard=importlib.import_module('scale_under_test.dashboard')
+        self.hass.data={dashboard.DOMAIN:{'entry':self.runtime}}
+        connection=types.SimpleNamespace(send_error=Mock(),send_result=Mock(),
+            user=types.SimpleNamespace(permissions=types.SimpleNamespace(check_entity=Mock(return_value=False))))
+        registry=types.SimpleNamespace(async_get_entity_id=Mock(return_value='sensor.renamed_weight'))
+        msg={'id':1,'entry_id':'entry','user_name':'A'}
+        with patch.object(dashboard.er,'async_get',return_value=registry):
+            await dashboard.websocket_history.__wrapped__(self.hass,connection,msg)
+            connection.send_result.assert_not_called()
+            self.assertEqual(connection.send_error.call_args.args[1],'unauthorized')
+            connection.user.permissions.check_entity.assert_called_with('sensor.renamed_weight','read')
+            connection.user.permissions.check_entity.return_value=True
+            await dashboard.websocket_history.__wrapped__(self.hass,connection,msg)
+            connection.send_result.assert_called_with(1,{'measurements':[]})
+            await dashboard.websocket_history.__wrapped__(self.hass,connection,{**msg,'user_name':'missing'})
+            self.assertEqual(connection.send_error.call_args.args[1],'not_found')
 
     async def test_impedance_backfills_but_weight_only_has_no_body_fat(self):
         record=self.runtime.ledger.get(self.mid)

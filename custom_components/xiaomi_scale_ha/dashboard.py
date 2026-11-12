@@ -3,6 +3,7 @@ from copy import deepcopy
 import json
 
 import voluptuous as vol
+from homeassistant.auth.permissions.const import POLICY_READ
 from homeassistant.components import frontend, websocket_api
 from homeassistant.components.lovelace import LOVELACE_DATA
 from homeassistant.components.lovelace.dashboard import LovelaceConfig, cached_json_fragment
@@ -10,6 +11,38 @@ from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers import entity_registry as er
 from homeassistant.core import callback
 from .const import DOMAIN, CONF_USERS
+from .metrics import METRIC_KEYS
+
+
+def measurement_history(runtime, user_name):
+    """Return chart values from the ledger, including recalculated old readings."""
+    fields = METRIC_KEYS | {'measurement_id', 'timestamp', 'weight', 'unit', 'has_impedance'}
+    return [{key: value for key, value in record.items() if key in fields}
+            for record in runtime.ledger.records
+            if record['status'] == 'assigned' and record.get('user_name') == user_name]
+
+
+@websocket_api.websocket_command({
+    vol.Required('type'): 'xiaomi_scale_ha/history',
+    vol.Required('entry_id'): str,
+    vol.Required('user_name'): str,
+})
+@websocket_api.async_response
+async def websocket_history(hass, connection, msg):
+    runtime = hass.data.get(DOMAIN, {}).get(msg['entry_id'])
+    if runtime is None:
+        connection.send_error(msg['id'], 'not_loaded', 'The scale is unavailable')
+        return
+    name = msg['user_name']
+    if not any(user['NAME'] == name for user in runtime.users):
+        connection.send_error(msg['id'], 'not_found', 'The scale profile does not exist')
+        return
+    entity_id = er.async_get(hass).async_get_entity_id(
+        'sensor', DOMAIN, f'{runtime.entry.entry_id}_{name.lower()}_weight')
+    if not entity_id or not connection.user.permissions.check_entity(entity_id, POLICY_READ):
+        connection.send_error(msg['id'], 'unauthorized', 'You cannot view these readings')
+        return
+    connection.send_result(msg['id'], {'measurements': measurement_history(runtime, name)})
 
 PROFILE_FIELDS = vol.Schema({
     vol.Optional('HEIGHT'): vol.Any(None, vol.All(vol.Coerce(float), vol.Range(min=30,max=250))),
@@ -86,6 +119,7 @@ class ScaleDashboard(LovelaceConfig):
             return registry.async_get_entity_id('sensor', DOMAIN, f'{entry_id}_{unique}')
         people = [{'name':u['NAME'],'user_id':u.get('HA_USER_ID'),
                    'weight_entity':entity(u['NAME'].lower()+'_weight'),
+                   'bmi_entity':entity(u['NAME'].lower()+'_bmi'),
                    'body_fat_entity':entity(u['NAME'].lower()+'_body_fat')} for u in self.runtime.users]
         return {'title':self.runtime.name,'views':[{'title':'Scale','path':'overview',
             'icon':'mdi:scale-bathroom','type':'panel','cards':[{
